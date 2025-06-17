@@ -1,29 +1,27 @@
-# Simple CPU deployment for whisper-large-v3
 services:
-  whisper-large-v3-cpu:
+  whisper-v2-cpu:
     build:
       context: .
       dockerfile: Dockerfile.cpu
-    image: whisper-large
-    container_name: whisper-large
+    image: faster-whisper-v2:cpu
+    container_name: whisper-v2-cpu
     ports:
       - "8000:8000"
     environment:
-      # API Security
-      - API_KEYS=${API_KEYS:-your-secret-key}
-      
-      # CPU Performance (auto-adjust to available CPUs)
+      # API Keys
+      - API_KEYS=${API_KEYS:-}
+      # Model configuration
+      - MODEL_SIZE=large-v3
+      - DEVICE=cpu
+      - COMPUTE_TYPE=int8
+      # CPU optimization
       - OMP_NUM_THREADS=${OMP_NUM_THREADS:-8}
       - MKL_NUM_THREADS=${MKL_NUM_THREADS:-8}
-      
-      # Optional: Override default performance for whisper-1 profile
-      # - BEAM_SIZE=5
-      # - PATIENCE=1.0
-      
+      # Performance tuning
+      - PATIENCE=1.0
     volumes:
-      # Model cache (3GB for large-v3)
+      # Model cache
       - whisper-models:/home/whisper/.cache
-      
     deploy:
       resources:
         limits:
@@ -32,9 +30,7 @@ services:
         reservations:
           cpus: "4"
           memory: 8G
-          
     restart: unless-stopped
-    
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/"]
       interval: 30s

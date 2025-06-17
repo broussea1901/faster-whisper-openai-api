@@ -1,0 +1,129 @@
+# MkDocs configuration for Faster Whisper v2
+
+site_name: Faster Whisper v2
+site_description: High-performance OpenAI-compatible Whisper API with Speaker Diarization
+site_author: Faster Whisper Contributors
+site_url: https://yourusername.github.io/faster-whisper-v2
+repo_url: https://github.com/yourusername/faster-whisper-v2
+repo_name: faster-whisper-v2
+
+# Theme configuration
+theme:
+  name: material
+  language: en
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+  icon:
+    repo: fontawesome/brands/github
+
+# Plugins
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            show_source: true
+            show_root_heading: true
+
+# Markdown extensions
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+# Navigation
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Quick Start: getting-started/quickstart.md
+    - Installation: getting-started/installation.md
+    - Configuration: getting-started/configuration.md
+  - API Reference:
+    - Endpoints: api/endpoints.md
+    - Models: api/models.md
+    - Response Formats: api/formats.md
+    - Authentication: api/authentication.md
+  - Features:
+    - Performance Profiles: features/profiles.md
+    - Speaker Diarization: features/diarization.md
+    - Subtitles: features/subtitles.md
+  - Deployment:
+    - Overview: deployment.md
+    - Docker: deployment/docker.md
+    - Kubernetes: deployment/kubernetes.md
+    - High Availability: deployment/ha.md
+  - Performance:
+    - Tuning Guide: performance.md
+    - Benchmarks: performance/benchmarks.md
+    - GPU Optimization: performance/gpu.md
+    - CPU Optimization: performance/cpu.md
+  - Development:
+    - Contributing: development/contributing.md
+    - Testing: development/testing.md
+    - Architecture: development/architecture.md
+  - Troubleshooting:
+    - Common Issues: troubleshooting/common.md
+    - FAQ: troubleshooting/faq.md
+
+# Extra configuration
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/yourusername/faster-whisper-v2
+    - icon: fontawesome/brands/docker
+      link: https://hub.docker.com/r/yourusername/faster-whisper-v2
+  version:
+    provider: mike

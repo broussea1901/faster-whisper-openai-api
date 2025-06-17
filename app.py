@@ -1,10 +1,15 @@
-# app.py - Optimized with performance profiles
+# app.py - Faster Whisper OpenAI-Compatible API v2
+# Includes performance profiles and optional speaker diarization
+
 import os
 import io
 import time
+import json
 import asyncio
-from typing import Optional, List, Dict
+import tempfile
+from typing import Optional, List, Dict, Union
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -15,69 +20,126 @@ import numpy as np
 import soundfile as sf
 
 # Configuration
-API_KEYS = os.getenv("API_KEYS", "").split(",")
+API_KEYS = os.getenv("API_KEYS", "").split(",") if os.getenv("API_KEYS") else []
 MODEL_SIZE = os.getenv("MODEL_SIZE", "large-v3")
-DEVICE = os.getenv("DEVICE", "cuda")
-COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "float16")
+DEVICE = os.getenv("DEVICE", "cuda" if os.getenv("CUDA_VISIBLE_DEVICES") is not None else "cpu")
+COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "float16" if DEVICE == "cuda" else "int8")
+ENABLE_DIARIZATION = os.getenv("ENABLE_DIARIZATION", "false").lower() == "true"
 
-# Default performance parameters (can be overridden by profiles)
-DEFAULT_BEAM_SIZE = int(os.getenv("BEAM_SIZE", "5"))
-DEFAULT_BEST_OF = int(os.getenv("BEST_OF", "5"))
-DEFAULT_PATIENCE = float(os.getenv("PATIENCE", "1.0"))
-DEFAULT_VAD_MIN_SILENCE_MS = int(os.getenv("VAD_MIN_SILENCE_MS", "500"))
-DEFAULT_VAD_THRESHOLD = float(os.getenv("VAD_THRESHOLD", "0.5"))
-NUM_WORKERS = int(os.getenv("NUM_WORKERS", "1"))
+# Check if running in offline mode
+OFFLINE_MODE = os.getenv("HF_HUB_OFFLINE", "0") == "1"
+if OFFLINE_MODE:
+    print("Running in OFFLINE mode - no model downloads will be attempted")
+    # Check if models exist
+    model_inventory_path = "/app/model_inventory.json"
+    if os.path.exists(model_inventory_path):
+        with open(model_inventory_path, 'r') as f:
+            inventory = json.load(f)
+            print(f"Model inventory: {json.dumps(inventory, indent=2)}")
+    else:
+        print("Warning: No model inventory found")
 
-# Performance profiles for different model variants
+# Performance profiles
 PERFORMANCE_PROFILES = {
     "whisper-1": {
         "name": "Balanced",
-        "description": "Balanced performance and quality",
-        "beam_size": DEFAULT_BEAM_SIZE,
-        "best_of": DEFAULT_BEST_OF,
-        "patience": DEFAULT_PATIENCE,
-        "vad_min_silence_ms": DEFAULT_VAD_MIN_SILENCE_MS,
-        "vad_threshold": DEFAULT_VAD_THRESHOLD,
+        "beam_size": 5,
+        "best_of": 5,
+        "patience": 1.0,
+        "vad_threshold": 0.5,
+        "vad_min_silence_ms": 500,
     },
     "whisper-1-fast": {
         "name": "Fast",
-        "description": "Optimized for speed (2-3x faster)",
         "beam_size": 1,
         "best_of": 1,
         "patience": 0.5,
-        "vad_min_silence_ms": 2000,
         "vad_threshold": 0.7,
+        "vad_min_silence_ms": 2000,
     },
     "whisper-1-quality": {
         "name": "High Quality",
-        "description": "Maximum accuracy (2x slower)",
         "beam_size": 10,
         "best_of": 10,
         "patience": 2.0,
-        "vad_min_silence_ms": 200,
         "vad_threshold": 0.3,
+        "vad_min_silence_ms": 200,
     }
 }
 
-app = FastAPI(title="Faster Whisper Large-v3 API with Performance Profiles")
-security = HTTPBearer()
+# Initialize diarization if enabled
+diarizer = None
+if ENABLE_DIARIZATION:
+    if DEVICE == "cuda":
+        try:
+            from diarization import NeMoDiarizer
+            print("Initializing NeMo diarization...")
+            diarizer = NeMoDiarizer(device=DEVICE)
+            print("✓ Speaker diarization enabled (NeMo)")
+        except Exception as e:
+            print(f"Warning: Failed to initialize diarization: {e}")
+            if OFFLINE_MODE:
+                print("Note: Running in offline mode - ensure NeMo models were pre-downloaded")
+            ENABLE_DIARIZATION = False
+    else:
+        print("Info: Diarization is only available on GPU")
+        ENABLE_DIARIZATION = False
 
-# Initialize model
-print(f"Loading {MODEL_SIZE} on {DEVICE} with {COMPUTE_TYPE}")
-whisper_model = WhisperModel(
-    MODEL_SIZE, 
-    device=DEVICE, 
-    compute_type=COMPUTE_TYPE,
-    download_root="/home/whisper/.cache/huggingface",
-    local_files_only=False
+# Global model and executor
+whisper_model = None
+executor = ThreadPoolExecutor(max_workers=int(os.getenv("NUM_WORKERS", "1")))
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage model lifecycle"""
+    global whisper_model
+    print(f"Loading Whisper model: {MODEL_SIZE} on {DEVICE} with {COMPUTE_TYPE}")
+    if OFFLINE_MODE:
+        print("Note: Offline mode enabled - using pre-downloaded models only")
+    
+    try:
+        whisper_model = WhisperModel(
+            MODEL_SIZE,
+            device=DEVICE,
+            compute_type=COMPUTE_TYPE,
+            download_root=os.getenv("HF_HOME", "/home/whisper/.cache/huggingface")
+        )
+        print("Model loaded successfully!")
+        
+        # Log model info if in offline mode
+        if OFFLINE_MODE:
+            print(f"Model cache location: {os.getenv('HF_HOME', '/home/whisper/.cache/huggingface')}")
+            
+    except Exception as e:
+        if OFFLINE_MODE:
+            print(f"ERROR: Failed to load model in offline mode: {e}")
+            print("Ensure models were pre-downloaded during image build")
+            raise
+        else:
+            print(f"Error loading model: {e}")
+            raise
+    
+    yield
+    # Cleanup
+    executor.shutdown(wait=True)
+
+app = FastAPI(
+    title="Faster Whisper API v2",
+    description="OpenAI-compatible Whisper API with performance profiles and speaker diarization",
+    version="2.0.0",
+    lifespan=lifespan
 )
-print("Model loaded successfully!")
 
-# Thread pool for async processing
-executor = ThreadPoolExecutor(max_workers=NUM_WORKERS)
+security = HTTPBearer()
 
 # Response models
 class TranscriptionResponse(BaseModel):
+    text: str
+    language: str
+    duration: float
+    segments: Optional[List[Dict]] = None
+
+class TranslationResponse(BaseModel):
     text: str
     language: str
     duration: float
@@ -87,25 +149,24 @@ class ModelInfo(BaseModel):
     object: str = "model"
     created: int = 1677532384
     owned_by: str = "openai"
-    description: Optional[str] = None
-    performance: Optional[Dict] = None
+    capabilities: Dict[str, bool] = {}
 
 # Authentication
 def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    if not API_KEYS or API_KEYS == [""]:
+    if not API_KEYS:
         return True
     if credentials.credentials not in API_KEYS:
         raise HTTPException(status_code=401, detail="Invalid API Key")
     return True
 
-# Optimized audio conversion
+# Audio processing
 def convert_audio(audio_bytes: bytes) -> tuple[np.ndarray, int]:
-    """Convert audio with optimizations for large files"""
+    """Convert audio bytes to numpy array"""
     try:
         audio_file = io.BytesIO(audio_bytes)
         data, samplerate = sf.read(audio_file)
         
-        # Convert to mono if needed
+        # Convert to mono
         if len(data.shape) > 1:
             data = np.mean(data, axis=1)
         
@@ -117,25 +178,31 @@ def convert_audio(audio_bytes: bytes) -> tuple[np.ndarray, int]:
         max_val = np.abs(data).max()
         if max_val > 1.0:
             data = data / max_val
-        elif max_val < 0.1 and max_val > 0:
+        elif 0 < max_val < 0.1:
             data = data / max_val * 0.5
             
         return data, samplerate
     except Exception as e:
         raise ValueError(f"Audio processing failed: {str(e)}")
 
-# Transcription with performance profile
-def transcribe_audio(audio_data, sample_rate, language=None, task="transcribe", profile="whisper-1"):
-    """Transcribe with performance profile settings"""
+async def transcribe_audio(
+    audio_data: np.ndarray,
+    sample_rate: int,
+    task: str = "transcribe",
+    language: Optional[str] = None,
+    profile: str = "whisper-1",
+    enable_diarization: bool = False,
+    num_speakers: Optional[int] = None
+) -> Dict:
+    """Transcribe audio with optional diarization"""
     
     # Get performance settings
     perf = PERFORMANCE_PROFILES.get(profile, PERFORMANCE_PROFILES["whisper-1"])
     
-    # Check duration
+    # Check duration for VAD
     duration = len(audio_data) / sample_rate
     use_vad = duration > 1.0
     
-    # VAD parameters from profile
     vad_params = {
         "min_silence_duration_ms": perf["vad_min_silence_ms"],
         "threshold": perf["vad_threshold"],
@@ -143,60 +210,125 @@ def transcribe_audio(audio_data, sample_rate, language=None, task="transcribe", 
         "speech_pad_ms": 400,
     } if use_vad else None
     
-    print(f"Using profile '{profile}': beam_size={perf['beam_size']}, vad={use_vad}")
+    try:
+        # Transcribe
+        segments, info = whisper_model.transcribe(
+            audio_data,
+            language=language,
+            task=task,
+            beam_size=perf["beam_size"],
+            best_of=perf["best_of"],
+            patience=perf["patience"],
+            temperature=0.0,
+            vad_filter=use_vad,
+            vad_parameters=vad_params,
+            word_timestamps=enable_diarization,  # Need words for alignment
+            condition_on_previous_text=True,
+            suppress_blank=True,
+            suppress_tokens=[-1],
+        )
+    except Exception as e:
+        if OFFLINE_MODE and "download" in str(e).lower():
+            raise HTTPException(
+                status_code=503,
+                detail=f"Model not available in offline mode. Ensure models were pre-downloaded during image build. Error: {str(e)}"
+            )
+        raise
     
-    # Transcribe with profile parameters
-    segments, info = whisper_model.transcribe(
-        audio_data,
-        language=language,
-        task=task,
-        beam_size=perf["beam_size"],
-        best_of=perf["best_of"],
-        patience=perf["patience"],
-        length_penalty=1.0,
-        temperature=0.0,
-        compression_ratio_threshold=2.4,
-        log_prob_threshold=-1.0,
-        no_speech_threshold=0.6,
-        condition_on_previous_text=True,
-        initial_prompt=None,
-        suppress_blank=True,
-        suppress_tokens=[-1],
-        without_timestamps=False,
-        max_initial_timestamp=1.0,
-        word_timestamps=False,
-        vad_filter=use_vad,
-        vad_parameters=vad_params,
-    )
+    # Process segments
+    processed_segments = []
+    full_text = ""
     
-    # Collect text
-    text = "".join(segment.text for segment in segments)
-    return text.strip(), info.language
+    # If diarization is enabled and available
+    if enable_diarization and diarizer and DEVICE == "cuda":
+        # Save audio temporarily
+        temp_path = tempfile.mktemp(suffix='.wav')
+        sf.write(temp_path, audio_data, sample_rate)
+        
+        try:
+            # Run diarization
+            speaker_segments = await asyncio.to_thread(
+                diarizer.diarize,
+                temp_path,
+                num_speakers
+            )
+            
+            # Align with transcription
+            for segment in segments:
+                seg_dict = {
+                    "start": segment.start,
+                    "end": segment.end,
+                    "text": segment.text
+                }
+                
+                # Find speaker
+                for spk_seg in speaker_segments:
+                    if (segment.start >= spk_seg["start"] and 
+                        segment.start < spk_seg["end"]):
+                        seg_dict["speaker"] = spk_seg["speaker"]
+                        break
+                
+                processed_segments.append(seg_dict)
+                full_text += segment.text
+                
+        except Exception as e:
+            if OFFLINE_MODE:
+                print(f"Diarization failed in offline mode: {e}")
+            raise
+        finally:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+    else:
+        # Standard processing without diarization
+        for segment in segments:
+            processed_segments.append({
+                "start": segment.start,
+                "end": segment.end,
+                "text": segment.text
+            })
+            full_text += segment.text
+    
+    return {
+        "text": full_text.strip(),
+        "language": info.language,
+        "segments": processed_segments if processed_segments else None
+    }
 
 @app.get("/")
 async def health():
-    return {
+    """Health check endpoint"""
+    health_info = {
         "status": "healthy",
         "model": MODEL_SIZE,
         "device": DEVICE,
         "compute_type": COMPUTE_TYPE,
-        "available_profiles": list(PERFORMANCE_PROFILES.keys())
+        "diarization_enabled": ENABLE_DIARIZATION,
+        "available_profiles": list(PERFORMANCE_PROFILES.keys()),
+        "offline_mode": OFFLINE_MODE
     }
+    
+    # Add model inventory info if available
+    if OFFLINE_MODE and os.path.exists("/app/model_inventory.json"):
+        try:
+            with open("/app/model_inventory.json", 'r') as f:
+                health_info["model_inventory"] = json.load(f)
+        except:
+            pass
+    
+    return health_info
 
 @app.get("/v1/models")
 async def list_models(authorized: bool = Depends(verify_api_key)):
-    """List available models with performance profiles"""
+    """List available models"""
     models = []
     
-    for model_id, profile in PERFORMANCE_PROFILES.items():
+    for model_id in PERFORMANCE_PROFILES:
         models.append(ModelInfo(
             id=model_id,
-            description=profile["description"],
-            performance={
-                "beam_size": profile["beam_size"],
-                "relative_speed": "1x" if model_id == "whisper-1" else 
-                                "2-3x faster" if model_id == "whisper-1-fast" else 
-                                "0.5x (higher quality)"
+            capabilities={
+                "transcription": True,
+                "translation": True,
+                "diarization": ENABLE_DIARIZATION
             }
         ).dict())
     
@@ -207,113 +339,159 @@ async def transcribe(
     file: UploadFile = File(...),
     model: str = Form("whisper-1"),
     language: Optional[str] = Form(None),
+    prompt: Optional[str] = Form(None),
     response_format: str = Form("json"),
+    temperature: float = Form(0.0),
+    timestamp_granularities: Optional[str] = Form(None),
     authorized: bool = Depends(verify_api_key)
 ):
-    """Transcription endpoint with performance profiles"""
+    """Transcribe audio file"""
     start_time = time.time()
     
-    # Validate model/profile
+    # Validate model
     if model not in PERFORMANCE_PROFILES:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Model '{model}' not found. Available: {list(PERFORMANCE_PROFILES.keys())}"
-        )
+        raise HTTPException(400, f"Invalid model: {model}")
+    
+    # Check for diarization request
+    enable_diarization = (
+        timestamp_granularities and 
+        "speaker" in timestamp_granularities and
+        ENABLE_DIARIZATION
+    )
     
     try:
         # Read audio
         audio_bytes = await file.read()
         if not audio_bytes:
-            raise HTTPException(status_code=400, detail="Empty audio file")
+            raise HTTPException(400, "Empty audio file")
         
         # Convert audio
         audio_data, sample_rate = convert_audio(audio_bytes)
         
-        # Run transcription in thread pool with selected profile
+        # Transcribe
         loop = asyncio.get_event_loop()
-        text, detected_language = await loop.run_in_executor(
+        result = await loop.run_in_executor(
             executor,
-            transcribe_audio,
-            audio_data,
-            sample_rate,
-            language,
-            "transcribe",
-            model  # Pass model as profile
+            asyncio.run,
+            transcribe_audio(
+                audio_data,
+                sample_rate,
+                "transcribe",
+                language,
+                model,
+                enable_diarization
+            )
         )
         
         processing_time = time.time() - start_time
         
-        # Return based on format
+        # Format response
         if response_format == "text":
-            return text
-        else:
+            return result["text"]
+        
+        elif response_format == "srt":
+            srt = ""
+            for i, seg in enumerate(result.get("segments", []), 1):
+                start = format_timestamp(seg["start"], "srt")
+                end = format_timestamp(seg["end"], "srt")
+                speaker = f"[{seg.get('speaker', 'SPEAKER')}] " if 'speaker' in seg else ""
+                srt += f"{i}\n{start} --> {end}\n{speaker}{seg['text'].strip()}\n\n"
+            return srt
+        
+        elif response_format == "vtt":
+            vtt = "WEBVTT\n\n"
+            for seg in result.get("segments", []):
+                start = format_timestamp(seg["start"], "vtt")
+                end = format_timestamp(seg["end"], "vtt")
+                speaker = f"<v {seg.get('speaker', 'SPEAKER')}>" if 'speaker' in seg else ""
+                vtt += f"{start} --> {end}\n{speaker}{seg['text'].strip()}\n\n"
+            return vtt
+        
+        else:  # json
             return TranscriptionResponse(
-                text=text,
-                language=detected_language,
-                duration=processing_time
+                text=result["text"],
+                language=result["language"],
+                duration=processing_time,
+                segments=result.get("segments")
             )
             
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(400, str(e))
     except Exception as e:
+        if OFFLINE_MODE and "model" in str(e).lower():
+            raise HTTPException(503, f"Model error in offline mode: {str(e)}")
         print(f"Transcription error: {e}")
-        raise HTTPException(status_code=500, detail="Transcription failed")
+        raise HTTPException(500, "Transcription failed")
 
 @app.post("/v1/audio/translations")
 async def translate(
     file: UploadFile = File(...),
     model: str = Form("whisper-1"),
+    prompt: Optional[str] = Form(None),
     response_format: str = Form("json"),
+    temperature: float = Form(0.0),
     authorized: bool = Depends(verify_api_key)
 ):
-    """Translation endpoint with performance profiles"""
+    """Translate audio to English"""
     start_time = time.time()
     
-    # Validate model/profile
+    # Validate model
     if model not in PERFORMANCE_PROFILES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Model '{model}' not found. Available: {list(PERFORMANCE_PROFILES.keys())}"
-        )
+        raise HTTPException(400, f"Invalid model: {model}")
     
     try:
-        # Read audio
+        # Read and convert audio
         audio_bytes = await file.read()
         if not audio_bytes:
-            raise HTTPException(status_code=400, detail="Empty audio file")
+            raise HTTPException(400, "Empty audio file")
         
-        # Convert audio
         audio_data, sample_rate = convert_audio(audio_bytes)
         
-        # Run translation in thread pool with selected profile
+        # Translate
         loop = asyncio.get_event_loop()
-        text, detected_language = await loop.run_in_executor(
+        result = await loop.run_in_executor(
             executor,
-            transcribe_audio,
-            audio_data,
-            sample_rate,
-            None,
-            "translate",
-            model  # Pass model as profile
+            asyncio.run,
+            transcribe_audio(
+                audio_data,
+                sample_rate,
+                "translate",
+                None,
+                model,
+                False  # No diarization for translation
+            )
         )
         
         processing_time = time.time() - start_time
         
-        # Return based on format
+        # Format response
         if response_format == "text":
-            return text
+            return result["text"]
         else:
-            return {
-                "text": text,
-                "language": detected_language,
-                "duration": processing_time
-            }
+            return TranslationResponse(
+                text=result["text"],
+                language=result["language"],
+                duration=processing_time
+            )
             
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(400, str(e))
     except Exception as e:
+        if OFFLINE_MODE and "model" in str(e).lower():
+            raise HTTPException(503, f"Model error in offline mode: {str(e)}")
         print(f"Translation error: {e}")
-        raise HTTPException(status_code=500, detail="Translation failed")
+        raise HTTPException(500, "Translation failed")
+
+def format_timestamp(seconds: float, fmt: str = "srt") -> str:
+    """Format timestamp for subtitles"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = seconds % 60
+    
+    if fmt == "srt":
+        return f"{hours:02d}:{minutes:02d}:{secs:06.3f}".replace(".", ",")
+    else:  # vtt
+        return f"{hours:02d}:{minutes:02d}:{secs:06.3f}"
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

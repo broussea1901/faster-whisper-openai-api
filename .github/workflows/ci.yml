@@ -1,0 +1,371 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      run_gpu_tests:
+        description: 'Run GPU tests'
+        required: false
+        default: 'false'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  lint-and-test:
+    name: Lint and Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Cache pip packages
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-asyncio pytest-cov black flake8 mypy
+
+    - name: Lint with flake8
+      run: |
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+    - name: Format check with black
+      run: black --check --diff .
+
+    - name: Type check with mypy
+      run: mypy app.py --ignore-missing-imports
+
+    - name: Run unit tests
+      run: |
+        pytest tests/ -v --cov=app --cov-report=xml --cov-report=html
+      continue-on-error: true  # Allow failure if tests don't exist yet
+
+  build-images:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - dockerfile: Dockerfile.cpu
+            image-suffix: cpu
+            platforms: linux/amd64,linux/arm64
+          - dockerfile: Dockerfile.gpu
+            image-suffix: gpu
+            platforms: linux/amd64
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      if: github.event_name != 'pull_request'
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        flavor: |
+          suffix=-${{ matrix.image-suffix }},onlatest=true
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ${{ matrix.dockerfile }}
+        platforms: ${{ matrix.platforms }}
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        build-args: |
+          BUILDKIT_INLINE_CACHE=1
+
+  test-cpu-integration:
+    name: CPU Integration Tests
+    runs-on: ubuntu-latest
+    needs: build-images
+    services:
+      whisper:
+        image: ${{ needs.build-images.outputs.image }}:cpu
+        options: --health-cmd "curl -f http://localhost:8000/" --health-interval 30s --health-timeout 10s --health-retries 5
+        ports:
+          - 8000:8000
+        env:
+          API_KEYS: test-key-123
+          MODEL_SIZE: large-v3
+          COMPUTE_TYPE: int8
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Wait for service
+      run: |
+        echo "Waiting for Whisper service to be ready..."
+        for i in {1..30}; do
+          if curl -f http://localhost:8000/ > /dev/null 2>&1; then
+            echo "Service is ready!"
+            break
+          fi
+          echo "Waiting... ($i/30)"
+          sleep 10
+        done
+
+    - name: Run API tests
+      run: |
+        chmod +x scripts/test-api.sh
+        API_KEY=test-key-123 ./scripts/test-api.sh
+
+    - name: Test performance profiles
+      run: |
+        # Test each profile
+        for model in whisper-1 whisper-1-fast whisper-1-quality; do
+          echo "Testing $model..."
+          time curl -X POST http://localhost:8000/v1/audio/transcriptions \
+            -H "Authorization: Bearer test-key-123" \
+            -F "file=@examples/test.wav" \
+            -F "model=$model" \
+            -F "response_format=json" | jq .
+        done
+
+    - name: Collect logs on failure
+      if: failure()
+      run: docker logs $(docker ps -aq)
+
+  test-gpu-integration:
+    name: GPU Integration Tests
+    runs-on: [self-hosted, gpu]
+    needs: build-images
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event.inputs.run_gpu_tests == 'true'
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Pull GPU image
+      run: docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:gpu
+
+    - name: Run GPU container
+      run: |
+        docker run -d \
+          --name whisper-gpu-test \
+          --gpus all \
+          -p 8000:8000 \
+          -e API_KEYS=test-key-123 \
+          -e ENABLE_DIARIZATION=true \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:gpu
+
+    - name: Wait for service
+      run: |
+        echo "Waiting for GPU service to be ready..."
+        for i in {1..60}; do
+          if curl -f http://localhost:8000/ > /dev/null 2>&1; then
+            echo "Service is ready!"
+            break
+          fi
+          echo "Waiting... ($i/60)"
+          sleep 10
+        done
+
+    - name: Verify diarization is enabled
+      run: |
+        response=$(curl -s http://localhost:8000/)
+        echo "$response" | jq .
+        diarization=$(echo "$response" | jq -r '.diarization_enabled')
+        if [ "$diarization" != "true" ]; then
+          echo "ERROR: Diarization should be enabled on GPU!"
+          exit 1
+        fi
+
+    - name: Run full test suite
+      run: |
+        chmod +x scripts/test-api.sh
+        API_KEY=test-key-123 ./scripts/test-api.sh
+
+    - name: Test diarization specifically
+      run: |
+        curl -X POST http://localhost:8000/v1/audio/transcriptions \
+          -H "Authorization: Bearer test-key-123" \
+          -F "file=@examples/test.wav" \
+          -F "model=whisper-1" \
+          -F "timestamp_granularities=speaker" \
+          -F "response_format=json" | jq '.segments'
+
+    - name: Cleanup
+      if: always()
+      run: |
+        docker stop whisper-gpu-test || true
+        docker rm whisper-gpu-test || true
+
+  benchmark:
+    name: Performance Benchmark
+    runs-on: ubuntu-latest
+    needs: [test-cpu-integration]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Run CPU benchmark
+      run: |
+        docker run -d \
+          --name whisper-benchmark \
+          -p 8000:8000 \
+          -e API_KEYS=bench-key \
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cpu-latest
+        
+        # Wait for service
+        sleep 60
+        
+        # Run benchmark
+        echo "## CPU Performance Benchmark" > benchmark-results.md
+        echo "| Profile | Time (s) | Speed |" >> benchmark-results.md
+        echo "|---------|----------|-------|" >> benchmark-results.md
+        
+        for model in whisper-1-fast whisper-1 whisper-1-quality; do
+          start=$(date +%s.%N)
+          curl -s -X POST http://localhost:8000/v1/audio/transcriptions \
+            -H "Authorization: Bearer bench-key" \
+            -F "file=@examples/test.wav" \
+            -F "model=$model" \
+            -o /dev/null
+          end=$(date +%s.%N)
+          time=$(echo "$end - $start" | bc)
+          echo "| $model | $time | $(echo "scale=2; 1/$time" | bc)x |" >> benchmark-results.md
+        done
+        
+        docker stop whisper-benchmark
+        docker rm whisper-benchmark
+
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-results
+        path: benchmark-results.md
+
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    needs: build-images
+    if: github.event_name == 'push'
+    
+    steps:
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cpu-latest
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  deploy-docs:
+    name: Deploy Documentation
+    runs-on: ubuntu-latest
+    needs: [test-cpu-integration, test-gpu-integration]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install MkDocs
+      run: |
+        pip install mkdocs mkdocs-material mkdocstrings[python]
+
+    - name: Build documentation
+      run: |
+        # Create docs if not exists
+        mkdir -p docs
+        cp README.md docs/index.md
+        cp DEPLOYMENT.md docs/deployment.md
+        cp PERFORMANCE_TUNING.md docs/performance.md
+        
+        # Build
+        mkdocs build
+
+    - name: Deploy to GitHub Pages
+      uses: peaceiris/actions-gh-pages@v3
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./site
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [test-cpu-integration, security-scan]
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Generate changelog
+      id: changelog
+      run: |
+        echo "## What's Changed" > changelog.md
+        git log --pretty=format:"* %s (%h)" $(git describe --tags --abbrev=0 HEAD^)..HEAD >> changelog.md
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        body_path: changelog.md
+        draft: false
+        prerelease: false
+        files: |
+          docker-compose.cpu.yml
+          docker-compose.gpu.yml
+          kserve-deployment.yaml

@@ -1,5 +1,5 @@
-# Optimized GPU Dockerfile for NVIDIA L40S with whisper-large-v3
-FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+# GPU Dockerfile for Faster Whisper v2 with Diarization (Air-gapped Ready)
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04 AS builder
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     git \
     curl \
+    libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Python 3.11 as default
@@ -16,56 +17,93 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 &
     update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 && \
     update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1
 
-# Set working directory
 WORKDIR /app
 
-# Install Python dependencies with CUDA support
+# Install PyTorch with CUDA support
 RUN pip install --no-cache-dir \
-    faster-whisper==1.0.3 \
-    fastapi==0.115.0 \
-    uvicorn[standard]==0.32.0 \
-    python-multipart==0.0.12 \
-    soundfile==0.12.1 \
-    numpy==1.26.4 \
-    pydantic==2.9.2 \
-    requests==2.32.3 \
-    nvidia-ml-py3==7.352.0
+    torch==2.1.0+cu121 \
+    torchaudio==2.1.0+cu121 \
+    --index-url https://download.pytorch.org/whl/cu121
 
-# Copy optimized application
-COPY app.py .
+# Install requirements
+COPY requirements-gpu.txt .
+RUN pip install --no-cache-dir -r requirements-gpu.txt
+
+# Create cache directories
+RUN mkdir -p /home/whisper/.cache/huggingface/hub && \
+    mkdir -p /models/nemo_cache
+
+# Pre-download Whisper model during build
+COPY download_models.py .
+ENV HF_HOME=/home/whisper/.cache/huggingface
+ENV NEMO_CACHE_DIR=/models/nemo_cache
+ENV TORCH_HOME=/home/whisper/.cache/torch
+
+# Download all models during build
+RUN python download_models.py && \
+    echo "Models downloaded successfully"
+
+# Final stage
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+
+# Install runtime dependencies only
+RUN apt-get update && apt-get install -y \
+    python3.11 \
+    python3-pip \
+    ffmpeg \
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python 3.11 as default
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 && \
+    update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1
+
+WORKDIR /app
+
+# Copy Python packages from builder
+COPY --from=builder /usr/local/lib/python3.11/dist-packages /usr/local/lib/python3.11/dist-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Copy pre-downloaded models from builder
+COPY --from=builder /home/whisper/.cache /home/whisper/.cache
+COPY --from=builder /models/nemo_cache /models/nemo_cache
+
+# Copy application files
+COPY app.py diarization.py ./
 
 # Create non-root user
 RUN useradd -m -u 1000 whisper && \
-    mkdir -p /home/whisper/.cache/huggingface/hub && \
-    chown -R whisper:whisper /app /home/whisper/.cache
+    chown -R whisper:whisper /app /home/whisper/.cache /models
 
 USER whisper
 
-# Expose port
 EXPOSE 8000
 
-# Optimized environment for L40S GPU with large-v3
+# GPU-optimized environment
 ENV PYTHONUNBUFFERED=1 \
     MODEL_SIZE=large-v3 \
     DEVICE=cuda \
     COMPUTE_TYPE=float16 \
-    # NVIDIA L40S optimization
     CUDA_VISIBLE_DEVICES=0 \
+    # L40S optimizations
     CUDA_LAUNCH_BLOCKING=0 \
     CUDNN_BENCHMARK=1 \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
-    # Performance settings now controlled by model profiles
-    # Default profile (whisper-1) will be used unless specified in API
-    # Cache
+    # Cache settings
     HF_HOME=/home/whisper/.cache/huggingface \
-    TRANSFORMERS_CACHE=/home/whisper/.cache/huggingface \
+    NEMO_CACHE_DIR=/models/nemo_cache \
+    TORCH_HOME=/home/whisper/.cache/torch \
+    # Enable diarization
+    ENABLE_DIARIZATION=true \
     # Workers
-    NUM_WORKERS=1
+    NUM_WORKERS=1 \
+    # Offline mode - prevent any downloads
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:8000/')"
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python -c "import requests; requests.get('http://localhost:8000/')" || exit 1
 
-# Run optimized for GPU
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--loop", "asyncio"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

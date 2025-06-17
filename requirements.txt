@@ -1,7 +1,17 @@
+# Core dependencies
 faster-whisper==1.0.3
 fastapi==0.115.0
 uvicorn[standard]==0.32.0
 python-multipart==0.0.12
+pydantic==2.9.2
+
+# Audio processing
 soundfile==0.12.1
 numpy==1.26.4
-pydantic==2.9.2
+
+# Optional: Diarization dependencies
+# Uncomment for GPU deployment with diarization
+# nemo-toolkit[asr]==1.23.0
+# torch==2.1.0
+# torchaudio==2.1.0
+# omegaconf>=2.3.0

@@ -1,0 +1,28 @@
+# Core dependencies
+faster-whisper==1.0.3
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+python-multipart==0.0.12
+pydantic==2.9.2
+requests==2.32.3
+
+# Audio processing
+soundfile==0.12.1
+numpy==1.26.4
+librosa==0.10.1
+
+# Diarization dependencies (required for GPU build)
+nemo-toolkit[asr]==1.23.0
+omegaconf>=2.3.0
+pytorch-lightning>=2.0.0
+tensorboard>=2.14.0
+webdataset>=0.2.48
+scipy>=1.10.1
+scikit-learn>=1.3.0
+
+# Additional NeMo requirements
+hydra-core>=1.3.2
+pandas>=2.0.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+numba>=0.58.0

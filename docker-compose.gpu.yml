@@ -1,0 +1,58 @@
+# GPU deployment with integrated diarization for Faster Whisper v2
+services:
+  whisper-v2-gpu:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+      args:
+        # Build-time model downloads
+        - DOWNLOAD_MODELS=true
+    image: faster-whisper-v2:gpu-diarization
+    container_name: whisper-v2-gpu
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      # API Keys
+      - API_KEYS=${API_KEYS:-}
+      # Model configuration
+      - MODEL_SIZE=${MODEL_SIZE:-large-v3}
+      - DEVICE=cuda
+      - COMPUTE_TYPE=${COMPUTE_TYPE:-float16}
+      # Diarization is always enabled in GPU build
+      - ENABLE_DIARIZATION=true
+      # GPU settings
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - CUDNN_BENCHMARK=1
+      # Performance
+      - NUM_WORKERS=${NUM_WORKERS:-1}
+      # Optional: Override diarization settings
+      - DIARIZATION_MAX_SPEAKERS=${DIARIZATION_MAX_SPEAKERS:-8}
+    volumes:
+      # Persistent model caches
+      - whisper-models:/home/whisper/.cache
+      - nemo-models:/models/nemo_cache
+      # Optional: Mount for processing local files
+      - ./audio:/audio:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          memory: 32G
+    shm_size: '8gb'
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; r = requests.get('http://localhost:8000/'); exit(0 if r.status_code == 200 and r.json().get('diarization_enabled') else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s  # Allow time for model downloads on first run
+
+volumes:
+  whisper-models:
+    driver: local
+  nemo-models:
+    driver: local

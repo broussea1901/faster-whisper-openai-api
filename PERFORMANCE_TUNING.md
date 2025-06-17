@@ -1,317 +1,317 @@
-# Performance Tuning Guide for Faster Whisper Server
+# Performance Tuning Guide - Faster Whisper v2
 
-## Overview
-
-This guide covers performance-related parameters and optimization strategies. The server now supports **performance profiles** through the standard OpenAI `model` parameter, maintaining full API compatibility.
+This comprehensive guide covers all aspects of performance optimization for Faster Whisper v2, including the new speaker diarization feature and performance profiles.
 
 ## Table of Contents
 
-1. [Performance Profiles (Recommended)](#performance-profiles-recommended)
-2. [Model Parameters](#model-parameters)
-3. [Inference Parameters](#inference-parameters)
-4. [VAD Parameters](#vad-parameters)
-5. [Hardware Optimization](#hardware-optimization)
-6. [Docker Performance Settings](#docker-performance-settings)
-7. [Recommended Configurations](#recommended-configurations)
+1. [Quick Optimization Guide](#quick-optimization-guide)
+2. [Performance Profiles](#performance-profiles)
+3. [Hardware Optimization](#hardware-optimization)
+4. [Model Selection](#model-selection)
+5. [Diarization Performance](#diarization-performance)
+6. [Advanced Tuning](#advanced-tuning)
+7. [Benchmarking](#benchmarking)
+8. [Monitoring](#monitoring)
+9. [Troubleshooting Performance Issues](#troubleshooting-performance-issues)
 
-## Performance Profiles (Recommended)
+## Quick Optimization Guide
 
-### Using Performance Profiles via API
+### Choose the Right Setup
 
-The easiest way to control performance is through the `model` parameter in your API calls:
+| Use Case | Hardware | Model | Profile | Expected Speed |
+|----------|----------|-------|---------|----------------|
+| Real-time transcription | GPU | large-v3 | whisper-1-fast | 30-50x realtime |
+| Meeting transcription | GPU | large-v3 | whisper-1 + diarization | 12-20x realtime |
+| Bulk processing | GPU | large-v3 | whisper-1-quality | 8-15x realtime |
+| Low-resource | CPU | large-v3 | whisper-1-fast | 1-3x realtime |
 
-| Model | Speed | Quality | Use Case |
-|-------|-------|---------|----------|
-| `whisper-1` | 1x (baseline) | ★★★★☆ | General purpose, balanced |
-| `whisper-1-fast` | 2-3x faster | ★★★☆☆ | Real-time, streaming, drafts |
-| `whisper-1-quality` | 0.5x (slower) | ★★★★★ | Maximum accuracy, professional |
-
-#### Example Usage:
+### Quick Commands
 
 ```bash
-# Fast transcription
-curl -X POST "http://localhost:8000/v1/audio/transcriptions" \
-  -H "Authorization: Bearer your-key" \
+# Fastest transcription (GPU)
+curl -X POST http://localhost:8000/v1/audio/transcriptions \
   -F "file=@audio.mp3" \
   -F "model=whisper-1-fast"
 
-# Quality transcription  
-curl -X POST "http://localhost:8000/v1/audio/transcriptions" \
-  -H "Authorization: Bearer your-key" \
+# Best quality (GPU)
+curl -X POST http://localhost:8000/v1/audio/transcriptions \
   -F "file=@audio.mp3" \
-  -F "model=whisper-1-quality"
+  -F "model=whisper-1-quality" \
+  -F "timestamp_granularities=speaker"
+
+# CPU optimized
+curl -X POST http://localhost:8000/v1/audio/transcriptions \
+  -F "file=@audio.mp3" \
+  -F "model=whisper-1-fast"
 ```
 
-#### Profile Settings:
+## Performance Profiles
 
-**whisper-1 (Balanced)**:
-- `beam_size=5`
-- `patience=1.0`
-- `vad_threshold=0.5`
+### Profile Comparison
 
-**whisper-1-fast**:
-- `beam_size=1` (greedy search)
-- `patience=0.5`
-- `vad_threshold=0.7` (aggressive)
-- `vad_min_silence_ms=2000`
+| Profile | Beam Size | Best Of | Patience | VAD Settings | Speed Multiplier |
+|---------|-----------|---------|----------|--------------|------------------|
+| `whisper-1-fast` | 1 | 1 | 0.5 | Aggressive | 2-3x |
+| `whisper-1` | 5 | 5 | 1.0 | Balanced | 1x (baseline) |
+| `whisper-1-quality` | 10 | 10 | 2.0 | Conservative | 0.5x |
 
-**whisper-1-quality**:
-- `beam_size=10`
-- `patience=2.0`
-- `vad_threshold=0.3` (conservative)
-- `vad_min_silence_ms=200`
+### Profile Selection Guide
 
-## Model Parameters
+```python
+# Python example for different use cases
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8000/v1")
 
-### Basic Model Settings
+# Live captioning - prioritize speed
+result = client.audio.transcriptions.create(
+    model="whisper-1-fast",
+    file=audio_file,
+    response_format="text"
+)
 
-| Parameter | Default | Description | Performance Impact |
-|-----------|---------|-------------|-------------------|
-| `MODEL_SIZE` | `base` | Model size (tiny to large-v3) | Larger = slower but more accurate |
-| `DEVICE` | `cuda` | Computing device | GPU is 5-10x faster |
-| `COMPUTE_TYPE` | `float16` | Quantization type | int8 is ~2x faster with slight quality loss |
+# Podcast transcription - balanced
+result = client.audio.transcriptions.create(
+    model="whisper-1",
+    file=audio_file,
+    response_format="srt"
+)
 
-### Advanced Model Settings
-
-```yaml
-environment:
-  # For maximum speed (with quality tradeoff)
-  - COMPUTE_TYPE=int8_float16  # 2x faster than float16
-  - DEVICE_INDEX=0             # Specific GPU selection
-  - CPU_THREADS=8              # For CPU inference
+# Legal/Medical - maximum accuracy
+result = client.audio.transcriptions.create(
+    model="whisper-1-quality",
+    file=audio_file,
+    response_format="json",
+    timestamp_granularities="word,speaker"  # If GPU
+)
 ```
 
-## Inference Parameters
+### Custom Profile Override
 
-### Beam Search Parameters
-
-| Parameter | Default | Range | Description | Speed Impact |
-|-----------|---------|-------|-------------|--------------|
-| `BEAM_SIZE` | 5 | 1-10 | Number of beams for search | Lower = faster |
-| `BEST_OF` | 5 | 1-10 | Number of candidates | Lower = faster |
-| `PATIENCE` | 1.0 | 0.0-2.0 | Early stopping patience | Lower = faster |
-| `LENGTH_PENALTY` | 1.0 | 0.0-2.0 | Length normalization | Minimal impact |
+While profiles are predefined, you can override settings via environment variables:
 
 ```yaml
-# Speed optimized (2-3x faster)
-environment:
-  - BEAM_SIZE=1      # Greedy search
-  - BEST_OF=1        # Single candidate
-  - PATIENCE=0.0     # No patience
-
-# Balanced (default)
-environment:
-  - BEAM_SIZE=5
-  - BEST_OF=5
-  - PATIENCE=1.0
-
-# Quality optimized
-environment:
-  - BEAM_SIZE=10
-  - BEST_OF=10
-  - PATIENCE=2.0
-```
-
-### Temperature and Fallback
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `TEMPERATURE_INCREMENT_ON_FALLBACK` | 0.2 | Temperature increase on retry |
-| `COMPRESSION_RATIO_THRESHOLD` | 2.4 | Threshold for detecting repetition |
-| `LOG_PROB_THRESHOLD` | -1.0 | Minimum average log probability |
-| `NO_SPEECH_THRESHOLD` | 0.6 | Threshold for detecting silence |
-
-### Other Performance Parameters
-
-```yaml
-environment:
-  # Disable for faster processing
-  - CONDITION_ON_PREVIOUS_TEXT=false  # Don't use context
-  - WORD_TIMESTAMPS=false              # Skip word-level timestamps
-  
-  # Enable for better quality
-  - CONDITION_ON_PREVIOUS_TEXT=true   # Use previous context
-  - WORD_TIMESTAMPS=true               # Get word-level timing
-```
-
-## VAD Parameters
-
-Voice Activity Detection can significantly speed up processing by skipping silent parts.
-
-| Parameter | Default | Description | Impact |
-|-----------|---------|-------------|---------|
-| `VAD_MIN_SILENCE_MS` | 500 | Minimum silence duration | Lower = more segments |
-| `VAD_THRESHOLD` | 0.5 | Speech detection threshold | Higher = fewer false positives |
-| `VAD_MIN_SPEECH_MS` | 250 | Minimum speech duration | Lower = more fragments |
-| `VAD_SPEECH_PAD_MS` | 400 | Padding around speech | Higher = better context |
-
-```yaml
-# Aggressive VAD (faster)
-environment:
-  - VAD_MIN_SILENCE_MS=2000   # Skip long silences
-  - VAD_THRESHOLD=0.7         # High confidence required
-  - VAD_MIN_SPEECH_MS=500     # Ignore short sounds
-
-# Conservative VAD (better quality)
-environment:
-  - VAD_MIN_SILENCE_MS=200    # Keep short pauses
-  - VAD_THRESHOLD=0.3         # Low threshold
-  - VAD_MIN_SPEECH_MS=100     # Capture everything
+# docker-compose.override.yml
+services:
+  whisper-v2-gpu:
+    environment:
+      # Override default whisper-1 profile settings
+      - BEAM_SIZE=3
+      - PATIENCE=0.8
+      - VAD_THRESHOLD=0.6
 ```
 
 ## Hardware Optimization
 
-### GPU Optimization
+### GPU Optimization (NVIDIA L40S)
 
 ```yaml
+# Optimal L40S configuration
 environment:
-  # NVIDIA GPU settings
-  - CUDA_VISIBLE_DEVICES=0           # Use first GPU
-  - CUDA_LAUNCH_BLOCKING=0           # Async execution
-  - CUDNN_BENCHMARK=1                # Enable cuDNN autotuner
-  - TF_ENABLE_CUDNN_TENSOR_OP=1      # Use Tensor Cores
+  - CUDA_VISIBLE_DEVICES=0
+  - COMPUTE_TYPE=float16
+  - CUDNN_BENCHMARK=1
+  - CUDA_LAUNCH_BLOCKING=0
+  - TF_ENABLE_CUDNN_TENSOR_OP=1
+  - TORCH_CUDA_ARCH_LIST=8.9  # L40S architecture
   
-  # Multi-GPU (data parallel)
-  - CUDA_VISIBLE_DEVICES=0,1         # Use multiple GPUs
+  # Memory optimization
+  - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
+  - CUDA_MODULE_LOADING=LAZY
+```
+
+### Multi-GPU Setup
+
+```bash
+# Distribute load across GPUs
+# GPU 0: Transcription only
+docker run -d \
+  --gpus '"device=0"' \
+  -e ENABLE_DIARIZATION=false \
+  -p 8000:8000 \
+  faster-whisper-v2:gpu
+
+# GPU 1: With diarization
+docker run -d \
+  --gpus '"device=1"' \
+  -e ENABLE_DIARIZATION=true \
+  -p 8001:8000 \
+  faster-whisper-v2:gpu
 ```
 
 ### CPU Optimization
 
 ```yaml
+# Maximum CPU performance
 environment:
-  # CPU threading
-  - OMP_NUM_THREADS=8                # OpenMP threads
-  - MKL_NUM_THREADS=8                # Intel MKL threads
-  - NUMEXPR_NUM_THREADS=8            # NumExpr threads
-  - VECLIB_MAXIMUM_THREADS=8         # macOS Accelerate
+  - COMPUTE_TYPE=int8  # Critical: 2x faster than float32
+  - OMP_NUM_THREADS=16
+  - MKL_NUM_THREADS=16
+  - OMP_PROC_BIND=true
+  - OMP_PLACES=cores
+  - KMP_AFFINITY=granularity=fine,compact,1,0
+  - KMP_BLOCKTIME=0
   
   # NUMA optimization
-  - OMP_PROC_BIND=true               # Bind threads to cores
-  - OMP_PLACES=cores                 # Thread placement
+  - OMP_PROC_BIND=spread
+  - OMP_PLACES=threads
 ```
 
 ### Memory Optimization
 
-```yaml
-deploy:
-  resources:
-    limits:
-      memory: 16G
-      cpu: "8"
-    reservations:
-      memory: 8G
-      devices:
-        - driver: nvidia
-          count: 1
-          capabilities: [gpu]
+```bash
+# GPU memory allocation
+docker run -d \
+  --gpus all \
+  --shm-size="8gb" \
+  -e PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:256" \
+  faster-whisper-v2:gpu
+
+# CPU memory optimization
+docker run -d \
+  --memory="16g" \
+  --memory-swap="16g" \
+  --memory-swappiness=10 \
+  faster-whisper-v2:cpu
 ```
 
-## Docker Performance Settings
+## Model Selection
 
-### Build-time Optimization
+### Model Performance Matrix
 
-```dockerfile
-# Multi-stage build for smaller image
-FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04 as builder
-# Build dependencies here
+| Model | Size | GPU VRAM | CPU RAM | Speed (GPU) | Speed (CPU) | Quality |
+|-------|------|----------|---------|-------------|-------------|---------|
+| tiny | 39M | 1GB | 1GB | 50-100x | 10-20x | ★★☆☆☆ |
+| base | 74M | 1GB | 2GB | 40-80x | 7-15x | ★★★☆☆ |
+| small | 244M | 2GB | 4GB | 25-50x | 4-8x | ★★★★☆ |
+| medium | 769M | 5GB | 8GB | 15-30x | 2-4x | ★★★★☆ |
+| large-v3 | 1550M | 10GB | 12GB | 10-25x | 1-2x | ★★★★★ |
 
-FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
-# Copy only runtime files
+### Dynamic Model Loading (Advanced)
 
-# Pre-download model during build
-RUN python -c "from faster_whisper import WhisperModel; \
-    WhisperModel('${MODEL_SIZE}', device='cpu', compute_type='float32')"
+```python
+# app_dynamic.py modification
+MODEL_CONFIGS = {
+    "tiny": {"device": "cuda", "compute_type": "int8_float16"},
+    "base": {"device": "cuda", "compute_type": "int8_float16"},
+    "small": {"device": "cuda", "compute_type": "float16"},
+    "medium": {"device": "cuda", "compute_type": "float16"},
+    "large-v3": {"device": "cuda", "compute_type": "float16"}
+}
+
+# Load model based on available memory
+def get_optimal_model():
+    import torch
+    if torch.cuda.is_available():
+        vram = torch.cuda.get_device_properties(0).total_memory
+        if vram > 16 * 1024**3:  # 16GB+
+            return "large-v3"
+        elif vram > 8 * 1024**3:  # 8GB+
+            return "medium"
+        else:
+            return "base"
+    return "base"  # CPU default
 ```
 
-### Runtime Optimization
+## Diarization Performance
+
+### Diarization Impact
+
+| Configuration | Speed | Memory | Accuracy |
+|--------------|-------|---------|----------|
+| No diarization | 15-25x | 10GB | N/A |
+| With diarization | 12-20x | 18GB | 85-95% |
+| Diarization + quality mode | 6-10x | 20GB | 90-98% |
+
+### Optimizing Diarization
 
 ```yaml
-services:
-  faster-whisper:
-    # Shared memory for parallel processing
-    shm_size: '2gb'
-    
-    # Disable logging for performance
-    logging:
-      driver: none
-    
-    # Host networking for lower latency
-    network_mode: host
-    
-    # Runtime options
-    runtime: nvidia
-    
-    # Scheduling
-    deploy:
-      placement:
-        constraints:
-          - node.labels.gpu == true
-```
-
-## Recommended Configurations
-
-### Real-time Transcription
-
-```yaml
-# Optimize for lowest latency
+# Diarization-specific settings
 environment:
-  - MODEL_SIZE=tiny
-  - DEVICE=cuda
-  - COMPUTE_TYPE=int8_float16
-  - BEAM_SIZE=1
-  - BEST_OF=1
-  - VAD_MIN_SILENCE_MS=500
-  - NUM_WORKERS=4
+  # Reduce speaker search space
+  - DIARIZATION_MAX_SPEAKERS=4  # Default: 8
+  
+  # Adjust clustering threshold
+  - DIARIZATION_THRESHOLD=0.7  # Higher = fewer speakers detected
+  
+  # Batch processing
+  - DIARIZATION_BATCH_SIZE=32  # L40S can handle large batches
 ```
 
-**Expected Performance**: 50-100x realtime on GPU
+### Conditional Diarization
 
-### Balanced Quality/Speed
+```python
+# Only enable diarization for longer audio
+async def smart_transcribe(audio_data, sample_rate):
+    duration = len(audio_data) / sample_rate
+    
+    # Skip diarization for short clips
+    enable_diarization = duration > 30  # seconds
+    
+    return await transcribe_audio(
+        audio_data,
+        sample_rate,
+        enable_diarization=enable_diarization
+    )
+```
+
+## Advanced Tuning
+
+### Request Batching
+
+```python
+# Batch multiple requests for efficiency
+from asyncio import Queue, gather
+
+class BatchProcessor:
+    def __init__(self, batch_size=4, timeout=1.0):
+        self.queue = Queue()
+        self.batch_size = batch_size
+        self.timeout = timeout
+    
+    async def process_batch(self, requests):
+        # Process multiple files in parallel
+        tasks = [
+            transcribe_audio(req['audio'], req['sample_rate'])
+            for req in requests
+        ]
+        return await gather(*tasks)
+```
+
+### Caching Strategy
+
+```python
+# Cache frequent transcriptions
+from functools import lru_cache
+import hashlib
+
+@lru_cache(maxsize=1000)
+def get_cached_transcription(audio_hash, model, profile):
+    # Return cached result if available
+    pass
+
+def compute_audio_hash(audio_data):
+    return hashlib.md5(audio_data.tobytes()).hexdigest()
+```
+
+### Pipeline Optimization
 
 ```yaml
-# Good accuracy with reasonable speed
-environment:
-  - MODEL_SIZE=base
-  - DEVICE=cuda
-  - COMPUTE_TYPE=float16
-  - BEAM_SIZE=5
-  - BEST_OF=5
-  - VAD_MIN_SILENCE_MS=500
+# Optimize Docker build for faster startup
+# Dockerfile.gpu optimization
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04 AS runtime
+
+# Multi-stage build
+FROM python:3.11 AS builder
+COPY requirements-gpu.txt .
+RUN pip wheel --no-cache-dir --no-deps --wheel-dir /wheels -r requirements-gpu.txt
+
+FROM runtime
+COPY --from=builder /wheels /wheels
+RUN pip install --no-cache /wheels/*
+
+# Pre-compile Python files
+RUN python -m compileall /app
 ```
-
-**Expected Performance**: 30-40x realtime on GPU
-
-### Maximum Quality
-
-```yaml
-# Best possible transcription
-environment:
-  - MODEL_SIZE=large-v3
-  - DEVICE=cuda
-  - COMPUTE_TYPE=float16
-  - BEAM_SIZE=10
-  - BEST_OF=10
-  - PATIENCE=2.0
-  - CONDITION_ON_PREVIOUS_TEXT=true
-  - WORD_TIMESTAMPS=true
-```
-
-**Expected Performance**: 8-15x realtime on GPU
-
-### CPU Optimization
-
-```yaml
-# Best settings for CPU
-environment:
-  - MODEL_SIZE=base
-  - DEVICE=cpu
-  - COMPUTE_TYPE=int8
-  - BEAM_SIZE=1
-  - OMP_NUM_THREADS=8
-  - VAD_MIN_SILENCE_MS=1000
-```
-
-**Expected Performance**: 5-10x realtime on modern CPU
 
 ## Benchmarking
 
@@ -321,87 +321,172 @@ environment:
 #!/bin/bash
 # benchmark.sh
 
-echo "Testing transcription performance..."
-
-# Test file (1 minute audio)
-TEST_FILE="test_1min.wav"
-
-# Warm up
-curl -s -X POST "http://localhost:8000/v1/audio/transcriptions" \
-  -H "Authorization: Bearer your-key" \
-  -F "file=@$TEST_FILE" \
-  -F "model=whisper-1" > /dev/null
-
-# Benchmark
-echo "Running 10 iterations..."
-total_time=0
-for i in {1..10}; do
-  start=$(date +%s.%N)
-  curl -s -X POST "http://localhost:8000/v1/audio/transcriptions" \
-    -H "Authorization: Bearer your-key" \
-    -F "file=@$TEST_FILE" \
-    -F "model=whisper-1" > /dev/null
-  end=$(date +%s.%N)
-  elapsed=$(echo "$end - $start" | bc)
-  total_time=$(echo "$total_time + $elapsed" | bc)
-  echo "Iteration $i: ${elapsed}s"
+# Test different configurations
+for profile in whisper-1-fast whisper-1 whisper-1-quality; do
+    echo "Testing $profile..."
+    
+    # Measure time and memory
+    /usr/bin/time -v curl -s -X POST http://localhost:8000/v1/audio/transcriptions \
+        -F "file=@benchmark.wav" \
+        -F "model=$profile" \
+        -o /dev/null 2>&1 | grep -E "Elapsed|Maximum resident"
 done
 
-avg_time=$(echo "scale=2; $total_time / 10" | bc)
-rtf=$(echo "scale=2; 60 / $avg_time" | bc)
-echo "Average time: ${avg_time}s"
-echo "Real-time factor: ${rtf}x"
+# GPU utilization
+nvidia-smi --query-gpu=utilization.gpu,utilization.memory \
+    --format=csv,noheader,nounits -l 1 > gpu_usage.log &
 ```
 
-## Monitoring Performance
-
-### Key Metrics to Monitor
-
-1. **Response Time**: Time to process audio
-2. **Real-time Factor**: Audio duration / processing time
-3. **GPU Utilization**: `nvidia-smi dmon -s u`
-4. **Memory Usage**: Model memory footprint
-5. **Queue Length**: For production deployments
-
-### Prometheus Metrics
+### Automated Performance Testing
 
 ```python
-# Add to app.py for monitoring
-from prometheus_client import Counter, Histogram, Gauge
+# performance_test.py
+import time
+import requests
+import statistics
 
+def benchmark_profile(profile, audio_file, iterations=10):
+    times = []
+    
+    for _ in range(iterations):
+        start = time.time()
+        
+        response = requests.post(
+            "http://localhost:8000/v1/audio/transcriptions",
+            files={"file": open(audio_file, "rb")},
+            data={"model": profile}
+        )
+        
+        times.append(time.time() - start)
+    
+    return {
+        "profile": profile,
+        "mean": statistics.mean(times),
+        "median": statistics.median(times),
+        "stdev": statistics.stdev(times),
+        "min": min(times),
+        "max": max(times)
+    }
+
+# Run benchmarks
+for profile in ["whisper-1-fast", "whisper-1", "whisper-1-quality"]:
+    results = benchmark_profile(profile, "test.wav")
+    print(f"{profile}: {results['mean']:.2f}s (±{results['stdev']:.2f}s)")
+```
+
+## Monitoring
+
+### Key Metrics to Track
+
+```python
+# Add to app.py for Prometheus metrics
+from prometheus_client import Counter, Histogram, Gauge, generate_latest
+
+# Metrics
 transcription_duration = Histogram(
     'transcription_duration_seconds',
-    'Time spent processing transcription',
-    ['model_size', 'audio_duration']
+    'Time spent in transcription',
+    ['model', 'profile', 'with_diarization']
 )
 
-gpu_utilization = Gauge(
-    'gpu_utilization_percent',
-    'Current GPU utilization'
+gpu_memory_usage = Gauge(
+    'gpu_memory_usage_bytes',
+    'Current GPU memory usage'
+)
+
+active_requests = Gauge(
+    'active_transcription_requests',
+    'Number of active transcription requests'
+)
+
+@app.get("/metrics")
+async def metrics():
+    return Response(generate_latest(), media_type="text/plain")
+```
+
+### Grafana Dashboard Queries
+
+```promql
+# Average response time by profile
+avg(rate(transcription_duration_seconds_sum[5m])) by (profile) 
+/ avg(rate(transcription_duration_seconds_count[5m])) by (profile)
+
+# GPU utilization
+avg(gpu_memory_usage_bytes) / (16 * 1024 * 1024 * 1024) * 100
+
+# Requests per second by profile
+sum(rate(transcription_duration_seconds_count[1m])) by (profile)
+
+# P95 latency
+histogram_quantile(0.95, 
+  sum(rate(transcription_duration_seconds_bucket[5m])) by (le, profile)
 )
 ```
 
 ## Troubleshooting Performance Issues
 
-### Common Issues
+### Common Issues and Solutions
 
-1. **Slow first request**: Model loading - pre-load during startup
-2. **Memory spikes**: Large audio files - implement chunking
-3. **GPU underutilization**: Increase batch size or parallel requests
-4. **High latency**: Check VAD settings and beam size
-5. **Quality degradation**: Balance speed optimizations
+1. **Slow First Request**
+   ```bash
+   # Pre-warm the model
+   curl http://localhost:8000/ > /dev/null
+   
+   # Or in Docker startup
+   CMD ["sh", "-c", "python -c 'import app; print(\"Model loaded\")' && uvicorn app:app --host 0.0.0.0"]
+   ```
 
-### Performance Profiling
+2. **Memory Leaks**
+   ```python
+   # Add memory profiling
+   import tracemalloc
+   tracemalloc.start()
+   
+   # In your endpoint
+   current, peak = tracemalloc.get_traced_memory()
+   print(f"Current memory usage: {current / 10**6:.1f} MB")
+   ```
 
-```python
-# Enable profiling
-import cProfile
-import pstats
+3. **GPU Underutilization**
+   ```bash
+   # Check GPU usage
+   nvidia-smi dmon -s u -c 10
+   
+   # Increase batch size or concurrent requests
+   -e NUM_WORKERS=2
+   ```
 
-profiler = cProfile.Profile()
-profiler.enable()
-# ... transcription code ...
-profiler.disable()
-stats = pstats.Stats(profiler).sort_stats('cumulative')
-stats.print_stats()
-```
+4. **CPU Throttling**
+   ```bash
+   # Check CPU frequency
+   watch -n 1 "grep MHz /proc/cpuinfo"
+   
+   # Set performance governor
+   sudo cpupower frequency-set -g performance
+   ```
+
+### Performance Debugging Checklist
+
+- [ ] Verify correct compute type (int8 for CPU, float16 for GPU)
+- [ ] Check model is loaded on correct device
+- [ ] Monitor GPU/CPU utilization during requests
+- [ ] Verify no thermal throttling
+- [ ] Check Docker resource limits
+- [ ] Review VAD settings for audio type
+- [ ] Confirm profile selection matches use case
+- [ ] Validate audio preprocessing isn't bottleneck
+- [ ] Check network latency for remote requests
+- [ ] Review concurrent request handling
+
+## Best Practices Summary
+
+1. **Always use performance profiles** - Don't rely on defaults
+2. **Match hardware to workload** - Use GPU for diarization
+3. **Monitor continuously** - Set up metrics and alerts
+4. **Batch when possible** - Group similar requests
+5. **Cache strategically** - For repeated content
+6. **Pre-warm models** - Avoid cold start penalties
+7. **Use appropriate formats** - Text is faster than JSON
+8. **Optimize audio input** - Correct sample rate, mono
+9. **Scale horizontally** - Multiple containers > one large
+10. **Test with real data** - Synthetic benchmarks can mislead

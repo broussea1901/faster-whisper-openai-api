@@ -1,32 +1,27 @@
-# KServe deployment optimized for NVIDIA L40S with whisper-large-v3
+# KServe deployment for Faster Whisper v2 on L40S
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: whisper-config
+  name: whisper-v2-config
   namespace: default
 data:
   API_KEYS: "your-production-key-1,your-production-key-2"
-  # Optional: Override default performance settings
-  # BEAM_SIZE: "5"
-  # PATIENCE: "1.0"
 ---
 apiVersion: serving.kserve.io/v1beta1
 kind: InferenceService
 metadata:
-  name: whisper-large-v3-l40s
+  name: whisper-v2-l40s
   namespace: default
   annotations:
     serving.kserve.io/deploymentMode: "RawDeployment"
     serving.kserve.io/autoscalerClass: "hpa"
-    serving.kserve.io/metric: "gpu"
-    serving.kserve.io/targetUtilizationPercentage: "80"
 spec:
   predictor:
     minReplicas: 1
     maxReplicas: 4
     containers:
     - name: whisper-server
-      image: your-registry/whisper-large-v3:gpu-l40s
+      image: your-registry/faster-whisper-v2:gpu-l40s
       ports:
       - containerPort: 8000
         protocol: TCP
@@ -35,17 +30,18 @@ spec:
       - name: API_KEYS
         valueFrom:
           configMapKeyRef:
-            name: whisper-config
+            name: whisper-v2-config
             key: API_KEYS
-      # Model configuration
       - name: MODEL_SIZE
         value: "large-v3"
       - name: DEVICE
         value: "cuda"
       - name: COMPUTE_TYPE
         value: "float16"
-      # Performance profiles are now controlled via API
-      # Users can select: whisper-1, whisper-1-fast, or whisper-1-quality
+      - name: ENABLE_DIARIZATION
+        value: "true"
+      - name: CUDA_VISIBLE_DEVICES
+        value: "0"
       resources:
         requests:
           cpu: "4"
@@ -53,7 +49,7 @@ spec:
           nvidia.com/gpu: "1"
         limits:
           cpu: "8"
-          memory: "24Gi"
+          memory: "32Gi"
           nvidia.com/gpu: "1"
       readinessProbe:
         httpGet:
@@ -62,8 +58,6 @@ spec:
         initialDelaySeconds: 60
         periodSeconds: 10
         timeoutSeconds: 5
-        successThreshold: 1
-        failureThreshold: 3
       livenessProbe:
         httpGet:
           path: /
@@ -71,26 +65,26 @@ spec:
         initialDelaySeconds: 120
         periodSeconds: 30
         timeoutSeconds: 5
-        failureThreshold: 3
       volumeMounts:
       - name: model-cache
         mountPath: /home/whisper/.cache
+      - name: nemo-cache
+        mountPath: /models/nemo_cache
       - name: shm
         mountPath: /dev/shm
     volumes:
     - name: model-cache
       persistentVolumeClaim:
         claimName: whisper-model-cache-pvc
+    - name: nemo-cache
+      persistentVolumeClaim:
+        claimName: nemo-model-cache-pvc
     - name: shm
       emptyDir:
         medium: Memory
-        sizeLimit: 4Gi
+        sizeLimit: 8Gi
     nodeSelector:
       nvidia.com/gpu.product: "NVIDIA-L40S"
-    tolerations:
-    - key: nvidia.com/gpu
-      operator: Exists
-      effect: NoSchedule
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -106,18 +100,30 @@ spec:
   storageClassName: fast-ssd
 ---
 apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nemo-model-cache-pvc
+  namespace: default
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: fast-ssd
+---
+apiVersion: v1
 kind: Service
 metadata:
-  name: whisper-large-v3-service
+  name: whisper-v2-service
   namespace: default
   labels:
-    app: whisper-large-v3
+    app: whisper-v2
   annotations:
     description: |
-      Whisper API with performance profiles:
-      - whisper-1: Balanced performance
-      - whisper-1-fast: 2-3x faster 
-      - whisper-1-quality: Maximum accuracy
+      Faster Whisper v2 API
+      Models: whisper-1, whisper-1-fast, whisper-1-quality
+      Features: Transcription, Translation, Speaker Diarization
 spec:
   type: ClusterIP
   ports:
@@ -126,18 +132,18 @@ spec:
     protocol: TCP
     name: http
   selector:
-    serving.kserve.io/inferenceservice: whisper-large-v3-l40s
+    serving.kserve.io/inferenceservice: whisper-v2-l40s
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: whisper-large-v3-hpa
+  name: whisper-v2-hpa
   namespace: default
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: whisper-large-v3-l40s-predictor-default
+    name: whisper-v2-l40s-predictor-default
   minReplicas: 1
   maxReplicas: 4
   metrics:
@@ -149,20 +155,12 @@ spec:
         averageUtilization: 80
   - type: Resource
     resource:
-      name: cpu
+      name: memory
       target:
         type: Utilization
-        averageUtilization: 70
+        averageUtilization: 75
   behavior:
     scaleDown:
       stabilizationWindowSeconds: 300
-      policies:
-      - type: Percent
-        value: 50
-        periodSeconds: 300
     scaleUp:
       stabilizationWindowSeconds: 30
-      policies:
-      - type: Percent
-        value: 100
-        periodSeconds: 30

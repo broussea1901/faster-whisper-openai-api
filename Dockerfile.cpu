@@ -1,59 +1,79 @@
-# Optimized CPU Dockerfile for whisper-large-v3
-FROM python:3.11-slim
+# CPU Dockerfile for Faster Whisper v2 (Air-gapped Ready)
+FROM python:3.11-slim AS builder
 
-# Install system dependencies
+# Install build dependencies
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     git \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
 WORKDIR /app
 
 # Install Python dependencies
-RUN pip install --no-cache-dir \
-    faster-whisper==1.0.3 \
-    fastapi==0.115.0 \
-    uvicorn[standard]==0.32.0 \
-    python-multipart==0.0.12 \
-    soundfile==0.12.1 \
-    numpy==1.26.4 \
-    pydantic==2.9.2 \
-    requests==2.32.3
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy optimized application
+# Create cache directories
+RUN mkdir -p /home/whisper/.cache/huggingface/hub
+
+# Pre-download Whisper model during build
+COPY download_models.py .
+ENV HF_HOME=/home/whisper/.cache/huggingface
+ENV MODEL_SIZE=large-v3
+
+# Download model during build
+RUN python download_models.py && \
+    echo "Model downloaded successfully"
+
+# Final stage
+FROM python:3.11-slim
+
+# Install runtime dependencies only
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy Python packages from builder
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Copy pre-downloaded models from builder
+COPY --from=builder /home/whisper/.cache /home/whisper/.cache
+
+# Copy application files
 COPY app.py .
+COPY --from=builder /app/model_inventory.json .
 
 # Create non-root user
 RUN useradd -m -u 1000 whisper && \
-    mkdir -p /home/whisper/.cache/huggingface/hub && \
     chown -R whisper:whisper /app /home/whisper/.cache
 
 USER whisper
 
-# Expose port
 EXPOSE 8000
 
-# Optimized environment for CPU with large-v3
+# CPU-optimized environment
 ENV PYTHONUNBUFFERED=1 \
     MODEL_SIZE=large-v3 \
     DEVICE=cpu \
     COMPUTE_TYPE=int8 \
-    # CPU optimization (will be overridden by docker-compose if needed)
+    # CPU optimization
     OMP_NUM_THREADS=8 \
     MKL_NUM_THREADS=8 \
     OMP_PROC_BIND=true \
     OMP_PLACES=cores \
-    # Performance settings now controlled by model profiles
-    # Default profile (whisper-1) will be used unless specified in API
-    # Cache
+    # Cache settings
     HF_HOME=/home/whisper/.cache/huggingface \
-    TRANSFORMERS_CACHE=/home/whisper/.cache/huggingface
+    # Disable diarization for CPU
+    ENABLE_DIARIZATION=false \
+    # Offline mode - prevent any downloads
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:8000/')"
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python -c "import requests; requests.get('http://localhost:8000/')" || exit 1
 
-# Run with single worker for CPU
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--loop", "asyncio"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+*.log
+
+# Docker
+*.log
+.docker/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Model cache
+models/
+*.bin
+*.pt
+*.onnx
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test files
+test_audio/
+*.mp3
+*.wav
+*.m4a
+*.flac

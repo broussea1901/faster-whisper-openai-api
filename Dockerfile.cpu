@@ -1,41 +1,64 @@
-# Use Python 3.11 slim image for CPU-only deployment
+# Optimized CPU Dockerfile for whisper-large-v3
 FROM python:3.11-slim
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     git \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app
 
-# Copy requirements first for better caching
-COPY requirements.txt .
-
 # Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir \
+    faster-whisper==1.0.3 \
+    fastapi==0.115.0 \
+    uvicorn[standard]==0.32.0 \
+    python-multipart==0.0.12 \
+    soundfile==0.12.1 \
+    numpy==1.26.4 \
+    pydantic==2.9.2 \
+    requests==2.32.3
 
-# Copy application code
-COPY app.py .
+# Copy optimized application
+COPY app_optimized.py app.py
 
-# Create a non-root user
-RUN useradd -m -u 1000 whisper && chown -R whisper:whisper /app
+# Create non-root user
+RUN useradd -m -u 1000 whisper && \
+    mkdir -p /home/whisper/.cache/huggingface/hub && \
+    chown -R whisper:whisper /app /home/whisper/.cache
+
 USER whisper
 
 # Expose port
 EXPOSE 8000
 
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
-ENV MODEL_SIZE=base
-ENV DEVICE=cpu
-ENV COMPUTE_TYPE=int8
-ENV API_KEYS=""
+# Optimized environment for CPU with large-v3
+ENV PYTHONUNBUFFERED=1 \
+    MODEL_SIZE=large-v3 \
+    DEVICE=cpu \
+    COMPUTE_TYPE=int8 \
+    # CPU optimization (will be overridden by docker-compose if needed)
+    OMP_NUM_THREADS=8 \
+    MKL_NUM_THREADS=8 \
+    OMP_PROC_BIND=true \
+    OMP_PLACES=cores \
+    # Performance settings for large-v3
+    BEAM_SIZE=1 \
+    BEST_OF=1 \
+    PATIENCE=1.0 \
+    # Aggressive VAD for CPU
+    VAD_MIN_SILENCE_MS=2000 \
+    VAD_THRESHOLD=0.7 \
+    # Cache
+    HF_HOME=/home/whisper/.cache/huggingface \
+    TRANSFORMERS_CACHE=/home/whisper/.cache/huggingface
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=40s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
     CMD python -c "import requests; requests.get('http://localhost:8000/')"
 
-# Run the application
-CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run with single worker for CPU
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--loop", "asyncio"]

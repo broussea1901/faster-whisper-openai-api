@@ -5,7 +5,7 @@ echo "Building Faster Whisper OpenAI API Server..."
 
 # Build GPU version
 echo "Building GPU version..."
-docker build -t faster-whisper-server:latest -t faster-whisper-server:gpu .
+docker build -f Dockerfile.gpu -t faster-whisper-server:latest -t faster-whisper-server:gpu .
 
 # Build CPU version
 echo "Building CPU version..."

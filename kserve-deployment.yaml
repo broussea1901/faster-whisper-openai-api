@@ -1,0 +1,150 @@
+# KServe deployment optimized for NVIDIA L40S with whisper-large-v3
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: whisper-config
+  namespace: default
+data:
+  API_KEYS: "your-production-key-1,your-production-key-2"
+---
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: whisper-large-v3-l40s
+  namespace: default
+  annotations:
+    serving.kserve.io/deploymentMode: "RawDeployment"
+    serving.kserve.io/autoscalerClass: "hpa"
+    serving.kserve.io/metric: "gpu"
+    serving.kserve.io/targetUtilizationPercentage: "80"
+spec:
+  predictor:
+    minReplicas: 1
+    maxReplicas: 4
+    containers:
+    - name: whisper-server
+      image: your-registry/whisper-large-v3:gpu-l40s
+      ports:
+      - containerPort: 8000
+        protocol: TCP
+        name: http
+      env:
+      - name: API_KEYS
+        valueFrom:
+          configMapKeyRef:
+            name: whisper-config
+            key: API_KEYS
+      resources:
+        requests:
+          cpu: "4"
+          memory: "16Gi"
+          nvidia.com/gpu: "1"
+        limits:
+          cpu: "8"
+          memory: "24Gi"
+          nvidia.com/gpu: "1"
+      readinessProbe:
+        httpGet:
+          path: /
+          port: 8000
+        initialDelaySeconds: 60
+        periodSeconds: 10
+        timeoutSeconds: 5
+        successThreshold: 1
+        failureThreshold: 3
+      livenessProbe:
+        httpGet:
+          path: /
+          port: 8000
+        initialDelaySeconds: 120
+        periodSeconds: 30
+        timeoutSeconds: 5
+        failureThreshold: 3
+      volumeMounts:
+      - name: model-cache
+        mountPath: /home/whisper/.cache
+      - name: shm
+        mountPath: /dev/shm
+    volumes:
+    - name: model-cache
+      persistentVolumeClaim:
+        claimName: whisper-model-cache-pvc
+    - name: shm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 4Gi
+    nodeSelector:
+      nvidia.com/gpu.product: "NVIDIA-L40S"
+    tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: whisper-model-cache-pvc
+  namespace: default
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: fast-ssd
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: whisper-large-v3-service
+  namespace: default
+  labels:
+    app: whisper-large-v3
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 8000
+    protocol: TCP
+    name: http
+  selector:
+    serving.kserve.io/inferenceservice: whisper-large-v3-l40s
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: whisper-large-v3-hpa
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: whisper-large-v3-l40s-predictor-default
+  minReplicas: 1
+  maxReplicas: 4
+  metrics:
+  - type: Resource
+    resource:
+      name: nvidia.com/gpu
+      target:
+        type: Utilization
+        averageUtilization: 80
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 300
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 30

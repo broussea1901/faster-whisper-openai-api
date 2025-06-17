@@ -1,0 +1,76 @@
+# Optimized GPU Dockerfile for NVIDIA L40S with whisper-large-v3
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    python3.11 \
+    python3.11-dev \
+    python3-pip \
+    ffmpeg \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python 3.11 as default
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 && \
+    update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1
+
+# Set working directory
+WORKDIR /app
+
+# Install Python dependencies with CUDA support
+RUN pip install --no-cache-dir \
+    faster-whisper==1.0.3 \
+    fastapi==0.115.0 \
+    uvicorn[standard]==0.32.0 \
+    python-multipart==0.0.12 \
+    soundfile==0.12.1 \
+    numpy==1.26.4 \
+    pydantic==2.9.2 \
+    requests==2.32.3 \
+    nvidia-ml-py3==7.352.0
+
+# Copy optimized application
+COPY app_optimized.py app.py
+
+# Create non-root user
+RUN useradd -m -u 1000 whisper && \
+    mkdir -p /home/whisper/.cache/huggingface/hub && \
+    chown -R whisper:whisper /app /home/whisper/.cache
+
+USER whisper
+
+# Expose port
+EXPOSE 8000
+
+# Optimized environment for L40S GPU with large-v3
+ENV PYTHONUNBUFFERED=1 \
+    MODEL_SIZE=large-v3 \
+    DEVICE=cuda \
+    COMPUTE_TYPE=float16 \
+    # NVIDIA L40S optimization
+    CUDA_VISIBLE_DEVICES=0 \
+    CUDA_LAUNCH_BLOCKING=0 \
+    CUDNN_BENCHMARK=1 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    # Performance settings optimized for L40S
+    BEAM_SIZE=5 \
+    BEST_OF=5 \
+    PATIENCE=1.0 \
+    # Balanced VAD for GPU
+    VAD_MIN_SILENCE_MS=500 \
+    VAD_THRESHOLD=0.5 \
+    # Cache
+    HF_HOME=/home/whisper/.cache/huggingface \
+    TRANSFORMERS_CACHE=/home/whisper/.cache/huggingface \
+    # Workers
+    NUM_WORKERS=1
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD python -c "import requests; requests.get('http://localhost:8000/')"
+
+# Run optimized for GPU
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--loop", "asyncio"]

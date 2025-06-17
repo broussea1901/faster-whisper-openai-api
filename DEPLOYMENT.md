@@ -1,5 +1,12 @@
 # Deployment Instructions for Whisper Large-v3
 
+## Performance Profiles
+
+The server supports three performance profiles via the `model` parameter:
+- `whisper-1`: Balanced performance (default)
+- `whisper-1-fast`: 2-3x faster transcription
+- `whisper-1-quality`: Maximum accuracy (2x slower)
+
 ## CPU Deployment (Simple)
 
 ### 1. Setup

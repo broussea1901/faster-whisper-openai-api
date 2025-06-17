@@ -1,9 +1,9 @@
-# app_optimized.py - Optimized for whisper-large-v3 performance
+# app.py - Optimized with performance profiles
 import os
 import io
 import time
 import asyncio
-from typing import Optional, List
+from typing import Optional, List, Dict
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form
@@ -14,33 +14,56 @@ from faster_whisper import WhisperModel
 import numpy as np
 import soundfile as sf
 
-# Configuration with performance optimization
+# Configuration
 API_KEYS = os.getenv("API_KEYS", "").split(",")
 MODEL_SIZE = os.getenv("MODEL_SIZE", "large-v3")
 DEVICE = os.getenv("DEVICE", "cuda")
 COMPUTE_TYPE = os.getenv("COMPUTE_TYPE", "float16")
 
-# Performance parameters
-BEAM_SIZE = int(os.getenv("BEAM_SIZE", "5"))
-BEST_OF = int(os.getenv("BEST_OF", "5"))
-PATIENCE = float(os.getenv("PATIENCE", "1.0"))  # Must be > 0
-VAD_MIN_SILENCE_MS = int(os.getenv("VAD_MIN_SILENCE_MS", "500"))
-VAD_THRESHOLD = float(os.getenv("VAD_THRESHOLD", "0.5"))
+# Default performance parameters (can be overridden by profiles)
+DEFAULT_BEAM_SIZE = int(os.getenv("BEAM_SIZE", "5"))
+DEFAULT_BEST_OF = int(os.getenv("BEST_OF", "5"))
+DEFAULT_PATIENCE = float(os.getenv("PATIENCE", "1.0"))
+DEFAULT_VAD_MIN_SILENCE_MS = int(os.getenv("VAD_MIN_SILENCE_MS", "500"))
+DEFAULT_VAD_THRESHOLD = float(os.getenv("VAD_THRESHOLD", "0.5"))
 NUM_WORKERS = int(os.getenv("NUM_WORKERS", "1"))
 
-# Validate patience
-if PATIENCE <= 0:
-    PATIENCE = 1.0
-    print(f"Warning: PATIENCE must be > 0, setting to 1.0")
+# Performance profiles for different model variants
+PERFORMANCE_PROFILES = {
+    "whisper-1": {
+        "name": "Balanced",
+        "description": "Balanced performance and quality",
+        "beam_size": DEFAULT_BEAM_SIZE,
+        "best_of": DEFAULT_BEST_OF,
+        "patience": DEFAULT_PATIENCE,
+        "vad_min_silence_ms": DEFAULT_VAD_MIN_SILENCE_MS,
+        "vad_threshold": DEFAULT_VAD_THRESHOLD,
+    },
+    "whisper-1-fast": {
+        "name": "Fast",
+        "description": "Optimized for speed (2-3x faster)",
+        "beam_size": 1,
+        "best_of": 1,
+        "patience": 0.5,
+        "vad_min_silence_ms": 2000,
+        "vad_threshold": 0.7,
+    },
+    "whisper-1-quality": {
+        "name": "High Quality",
+        "description": "Maximum accuracy (2x slower)",
+        "beam_size": 10,
+        "best_of": 10,
+        "patience": 2.0,
+        "vad_min_silence_ms": 200,
+        "vad_threshold": 0.3,
+    }
+}
 
-app = FastAPI(title="Faster Whisper Large-v3 Optimized API")
+app = FastAPI(title="Faster Whisper Large-v3 API with Performance Profiles")
 security = HTTPBearer()
 
 # Initialize model
 print(f"Loading {MODEL_SIZE} on {DEVICE} with {COMPUTE_TYPE}")
-print(f"Performance: beam_size={BEAM_SIZE}, best_of={BEST_OF}, workers={NUM_WORKERS}")
-
-# Pre-load model for faster first inference
 whisper_model = WhisperModel(
     MODEL_SIZE, 
     device=DEVICE, 
@@ -48,6 +71,7 @@ whisper_model = WhisperModel(
     download_root="/home/whisper/.cache/huggingface",
     local_files_only=False
 )
+print("Model loaded successfully!")
 
 # Thread pool for async processing
 executor = ThreadPoolExecutor(max_workers=NUM_WORKERS)
@@ -57,6 +81,14 @@ class TranscriptionResponse(BaseModel):
     text: str
     language: str
     duration: float
+
+class ModelInfo(BaseModel):
+    id: str
+    object: str = "model"
+    created: int = 1677532384
+    owned_by: str = "openai"
+    description: Optional[str] = None
+    performance: Optional[Dict] = None
 
 # Authentication
 def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -92,30 +124,35 @@ def convert_audio(audio_bytes: bytes) -> tuple[np.ndarray, int]:
     except Exception as e:
         raise ValueError(f"Audio processing failed: {str(e)}")
 
-# Optimized transcription function
-def transcribe_audio(audio_data, sample_rate, language=None, task="transcribe"):
-    """Transcribe with optimized settings for large-v3"""
+# Transcription with performance profile
+def transcribe_audio(audio_data, sample_rate, language=None, task="transcribe", profile="whisper-1"):
+    """Transcribe with performance profile settings"""
+    
+    # Get performance settings
+    perf = PERFORMANCE_PROFILES.get(profile, PERFORMANCE_PROFILES["whisper-1"])
     
     # Check duration
     duration = len(audio_data) / sample_rate
     use_vad = duration > 1.0
     
-    # VAD parameters optimized for model
+    # VAD parameters from profile
     vad_params = {
-        "min_silence_duration_ms": VAD_MIN_SILENCE_MS,
-        "threshold": VAD_THRESHOLD,
+        "min_silence_duration_ms": perf["vad_min_silence_ms"],
+        "threshold": perf["vad_threshold"],
         "min_speech_duration_ms": 250,
         "speech_pad_ms": 400,
     } if use_vad else None
     
-    # Transcribe with optimized parameters
+    print(f"Using profile '{profile}': beam_size={perf['beam_size']}, vad={use_vad}")
+    
+    # Transcribe with profile parameters
     segments, info = whisper_model.transcribe(
         audio_data,
         language=language,
         task=task,
-        beam_size=BEAM_SIZE,
-        best_of=BEST_OF,
-        patience=PATIENCE,
+        beam_size=perf["beam_size"],
+        best_of=perf["best_of"],
+        patience=perf["patience"],
         length_penalty=1.0,
         temperature=0.0,
         compression_ratio_threshold=2.4,
@@ -142,20 +179,28 @@ async def health():
         "status": "healthy",
         "model": MODEL_SIZE,
         "device": DEVICE,
-        "compute_type": COMPUTE_TYPE
+        "compute_type": COMPUTE_TYPE,
+        "available_profiles": list(PERFORMANCE_PROFILES.keys())
     }
 
 @app.get("/v1/models")
 async def list_models(authorized: bool = Depends(verify_api_key)):
-    return {
-        "object": "list",
-        "data": [{
-            "id": "whisper-1",
-            "object": "model",
-            "created": 1677532384,
-            "owned_by": "openai"
-        }]
-    }
+    """List available models with performance profiles"""
+    models = []
+    
+    for model_id, profile in PERFORMANCE_PROFILES.items():
+        models.append(ModelInfo(
+            id=model_id,
+            description=profile["description"],
+            performance={
+                "beam_size": profile["beam_size"],
+                "relative_speed": "1x" if model_id == "whisper-1" else 
+                                "2-3x faster" if model_id == "whisper-1-fast" else 
+                                "0.5x (higher quality)"
+            }
+        ).dict())
+    
+    return {"object": "list", "data": models}
 
 @app.post("/v1/audio/transcriptions")
 async def transcribe(
@@ -165,8 +210,15 @@ async def transcribe(
     response_format: str = Form("json"),
     authorized: bool = Depends(verify_api_key)
 ):
-    """Optimized transcription endpoint"""
+    """Transcription endpoint with performance profiles"""
     start_time = time.time()
+    
+    # Validate model/profile
+    if model not in PERFORMANCE_PROFILES:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Model '{model}' not found. Available: {list(PERFORMANCE_PROFILES.keys())}"
+        )
     
     try:
         # Read audio
@@ -177,7 +229,7 @@ async def transcribe(
         # Convert audio
         audio_data, sample_rate = convert_audio(audio_bytes)
         
-        # Run transcription in thread pool
+        # Run transcription in thread pool with selected profile
         loop = asyncio.get_event_loop()
         text, detected_language = await loop.run_in_executor(
             executor,
@@ -185,7 +237,8 @@ async def transcribe(
             audio_data,
             sample_rate,
             language,
-            "transcribe"
+            "transcribe",
+            model  # Pass model as profile
         )
         
         processing_time = time.time() - start_time
@@ -213,8 +266,15 @@ async def translate(
     response_format: str = Form("json"),
     authorized: bool = Depends(verify_api_key)
 ):
-    """Optimized translation endpoint"""
+    """Translation endpoint with performance profiles"""
     start_time = time.time()
+    
+    # Validate model/profile
+    if model not in PERFORMANCE_PROFILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model '{model}' not found. Available: {list(PERFORMANCE_PROFILES.keys())}"
+        )
     
     try:
         # Read audio
@@ -225,7 +285,7 @@ async def translate(
         # Convert audio
         audio_data, sample_rate = convert_audio(audio_bytes)
         
-        # Run translation in thread pool
+        # Run translation in thread pool with selected profile
         loop = asyncio.get_event_loop()
         text, detected_language = await loop.run_in_executor(
             executor,
@@ -233,7 +293,8 @@ async def translate(
             audio_data,
             sample_rate,
             None,
-            "translate"
+            "translate",
+            model  # Pass model as profile
         )
         
         processing_time = time.time() - start_time

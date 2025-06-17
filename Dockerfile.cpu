@@ -23,7 +23,7 @@ RUN pip install --no-cache-dir \
     requests==2.32.3
 
 # Copy optimized application
-COPY app_optimized.py app.py
+COPY app.py .
 
 # Create non-root user
 RUN useradd -m -u 1000 whisper && \
@@ -45,13 +45,8 @@ ENV PYTHONUNBUFFERED=1 \
     MKL_NUM_THREADS=8 \
     OMP_PROC_BIND=true \
     OMP_PLACES=cores \
-    # Performance settings for large-v3
-    BEAM_SIZE=1 \
-    BEST_OF=1 \
-    PATIENCE=1.0 \
-    # Aggressive VAD for CPU
-    VAD_MIN_SILENCE_MS=2000 \
-    VAD_THRESHOLD=0.7 \
+    # Performance settings now controlled by model profiles
+    # Default profile (whisper-1) will be used unless specified in API
     # Cache
     HF_HOME=/home/whisper/.cache/huggingface \
     TRANSFORMERS_CACHE=/home/whisper/.cache/huggingface

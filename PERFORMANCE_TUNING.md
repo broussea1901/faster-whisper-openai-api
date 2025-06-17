@@ -2,16 +2,64 @@
 
 ## Overview
 
-This guide covers all performance-related parameters and optimization strategies for the Faster Whisper OpenAI-compatible server.
+This guide covers performance-related parameters and optimization strategies. The server now supports **performance profiles** through the standard OpenAI `model` parameter, maintaining full API compatibility.
 
 ## Table of Contents
 
-1. [Model Parameters](#model-parameters)
-2. [Inference Parameters](#inference-parameters)
-3. [VAD Parameters](#vad-parameters)
-4. [Hardware Optimization](#hardware-optimization)
-5. [Docker Performance Settings](#docker-performance-settings)
-6. [Recommended Configurations](#recommended-configurations)
+1. [Performance Profiles (Recommended)](#performance-profiles-recommended)
+2. [Model Parameters](#model-parameters)
+3. [Inference Parameters](#inference-parameters)
+4. [VAD Parameters](#vad-parameters)
+5. [Hardware Optimization](#hardware-optimization)
+6. [Docker Performance Settings](#docker-performance-settings)
+7. [Recommended Configurations](#recommended-configurations)
+
+## Performance Profiles (Recommended)
+
+### Using Performance Profiles via API
+
+The easiest way to control performance is through the `model` parameter in your API calls:
+
+| Model | Speed | Quality | Use Case |
+|-------|-------|---------|----------|
+| `whisper-1` | 1x (baseline) | ★★★★☆ | General purpose, balanced |
+| `whisper-1-fast` | 2-3x faster | ★★★☆☆ | Real-time, streaming, drafts |
+| `whisper-1-quality` | 0.5x (slower) | ★★★★★ | Maximum accuracy, professional |
+
+#### Example Usage:
+
+```bash
+# Fast transcription
+curl -X POST "http://localhost:8000/v1/audio/transcriptions" \
+  -H "Authorization: Bearer your-key" \
+  -F "file=@audio.mp3" \
+  -F "model=whisper-1-fast"
+
+# Quality transcription  
+curl -X POST "http://localhost:8000/v1/audio/transcriptions" \
+  -H "Authorization: Bearer your-key" \
+  -F "file=@audio.mp3" \
+  -F "model=whisper-1-quality"
+```
+
+#### Profile Settings:
+
+**whisper-1 (Balanced)**:
+- `beam_size=5`
+- `patience=1.0`
+- `vad_threshold=0.5`
+
+**whisper-1-fast**:
+- `beam_size=1` (greedy search)
+- `patience=0.5`
+- `vad_threshold=0.7` (aggressive)
+- `vad_min_silence_ms=2000`
+
+**whisper-1-quality**:
+- `beam_size=10`
+- `patience=2.0`
+- `vad_threshold=0.3` (conservative)
+- `vad_min_silence_ms=200`
 
 ## Model Parameters
 

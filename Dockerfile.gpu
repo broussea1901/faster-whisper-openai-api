@@ -32,7 +32,7 @@ RUN pip install --no-cache-dir \
     nvidia-ml-py3==7.352.0
 
 # Copy optimized application
-COPY app_optimized.py app.py
+COPY app.py .
 
 # Create non-root user
 RUN useradd -m -u 1000 whisper && \
@@ -55,13 +55,8 @@ ENV PYTHONUNBUFFERED=1 \
     CUDNN_BENCHMARK=1 \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
-    # Performance settings optimized for L40S
-    BEAM_SIZE=5 \
-    BEST_OF=5 \
-    PATIENCE=1.0 \
-    # Balanced VAD for GPU
-    VAD_MIN_SILENCE_MS=500 \
-    VAD_THRESHOLD=0.5 \
+    # Performance settings now controlled by model profiles
+    # Default profile (whisper-1) will be used unless specified in API
     # Cache
     HF_HOME=/home/whisper/.cache/huggingface \
     TRANSFORMERS_CACHE=/home/whisper/.cache/huggingface \

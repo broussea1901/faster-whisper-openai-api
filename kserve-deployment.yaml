@@ -6,6 +6,9 @@ metadata:
   namespace: default
 data:
   API_KEYS: "your-production-key-1,your-production-key-2"
+  # Optional: Override default performance settings
+  # BEAM_SIZE: "5"
+  # PATIENCE: "1.0"
 ---
 apiVersion: serving.kserve.io/v1beta1
 kind: InferenceService
@@ -34,6 +37,15 @@ spec:
           configMapKeyRef:
             name: whisper-config
             key: API_KEYS
+      # Model configuration
+      - name: MODEL_SIZE
+        value: "large-v3"
+      - name: DEVICE
+        value: "cuda"
+      - name: COMPUTE_TYPE
+        value: "float16"
+      # Performance profiles are now controlled via API
+      # Users can select: whisper-1, whisper-1-fast, or whisper-1-quality
       resources:
         requests:
           cpu: "4"
@@ -100,6 +112,12 @@ metadata:
   namespace: default
   labels:
     app: whisper-large-v3
+  annotations:
+    description: |
+      Whisper API with performance profiles:
+      - whisper-1: Balanced performance
+      - whisper-1-fast: 2-3x faster 
+      - whisper-1-quality: Maximum accuracy
 spec:
   type: ClusterIP
   ports:

@@ -29,7 +29,7 @@ else
 fi
 
 # Create a test audio file if it doesn't exist
-if [ ! -f "test.mp3" ] && [ ! -f "test.wav" ] &&  [ ! -f "test2.wav" ] ; then
+if [ ! -f "test.mp3" ] && [ ! -f "test.wav" ]; then
     echo ""
     echo -e "${YELLOW}No test audio file found. Creating one...${NC}"
     
@@ -62,10 +62,10 @@ fi
 
 # Determine which test file to use
 TEST_FILE=""
-if [ -f "test.mp3" ]; then
-    TEST_FILE="test.mp3"
-elif [ -f "test.wav" ]; then
+if [ -f "test.wav" ]; then
     TEST_FILE="test.wav"
+elif [ -f "test.mp3" ]; then
+    TEST_FILE="test.mp3"
 fi
 
 echo ""
@@ -89,7 +89,7 @@ fi
 echo ""
 
 # Test 2: Transcription endpoint (JSON)
-echo "🎯 Test 2: Transcription (JSON format)"
+echo "🎯 Test 2: Transcription (JSON format - Balanced)"
 echo "--------------------------------------"
 response=$(curl -s -X POST "$API_URL/v1/audio/transcriptions" \
   -H "Authorization: Bearer $API_KEY" \
@@ -107,27 +107,52 @@ fi
 
 echo ""
 
-# Test 3: Transcription endpoint (Text)
-echo "📝 Test 3: Transcription (Text format)"
-echo "--------------------------------------"
+# Test 3: Fast transcription
+echo "⚡ Test 3: Fast Transcription (whisper-1-fast)"
+echo "----------------------------------------------"
+start_time=$(date +%s.%N)
 response=$(curl -s -X POST "$API_URL/v1/audio/transcriptions" \
   -H "Authorization: Bearer $API_KEY" \
   -F "file=@$TEST_FILE" \
-  -F "model=whisper-1" \
+  -F "model=whisper-1-fast" \
   -F "response_format=text")
+end_time=$(date +%s.%N)
 
 if [ $? -eq 0 ]; then
-    echo -e "${GREEN}✓ Text format working${NC}"
+    elapsed=$(echo "$end_time - $start_time" | bc)
+    echo -e "${GREEN}✓ Fast transcription working (${elapsed}s)${NC}"
     echo "Transcribed text:"
     echo "$response"
 else
-    echo -e "${RED}✗ Text format failed${NC}"
+    echo -e "${RED}✗ Fast transcription failed${NC}"
 fi
 
 echo ""
 
-# Test 4: Translation endpoint
-echo "🌍 Test 4: Translation to English"
+# Test 4: Quality transcription
+echo "🏆 Test 4: Quality Transcription (whisper-1-quality)"
+echo "---------------------------------------------------"
+start_time=$(date +%s.%N)
+response=$(curl -s -X POST "$API_URL/v1/audio/transcriptions" \
+  -H "Authorization: Bearer $API_KEY" \
+  -F "file=@$TEST_FILE" \
+  -F "model=whisper-1-quality" \
+  -F "response_format=json")
+end_time=$(date +%s.%N)
+
+if [ $? -eq 0 ]; then
+    elapsed=$(echo "$end_time - $start_time" | bc)
+    echo -e "${GREEN}✓ Quality transcription working (${elapsed}s)${NC}"
+    echo "Response:"
+    echo "$response" | python3 -m json.tool 2>/dev/null || echo "$response"
+else
+    echo -e "${RED}✗ Quality transcription failed${NC}"
+fi
+
+echo ""
+
+# Test 5: Translation endpoint
+echo "🌍 Test 5: Translation to English"
 echo "---------------------------------"
 response=$(curl -s -X POST "$API_URL/v1/audio/translations" \
   -H "Authorization: Bearer $API_KEY" \
@@ -140,6 +165,30 @@ if [ $? -eq 0 ]; then
     echo "$response" | python3 -m json.tool 2>/dev/null || echo "$response"
 else
     echo -e "${RED}✗ Translation endpoint failed${NC}"
+fi
+
+echo ""
+
+# Test 6: Performance comparison
+echo "📊 Test 6: Performance Comparison"
+echo "---------------------------------"
+if [ -f "$TEST_FILE" ]; then
+    audio_duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$TEST_FILE" 2>/dev/null || echo "unknown")
+    echo "Audio duration: ${audio_duration}s"
+    echo ""
+    
+    for model in "whisper-1-fast" "whisper-1" "whisper-1-quality"; do
+        echo -n "Testing $model... "
+        start_time=$(date +%s.%N)
+        curl -s -X POST "$API_URL/v1/audio/transcriptions" \
+          -H "Authorization: Bearer $API_KEY" \
+          -F "file=@$TEST_FILE" \
+          -F "model=$model" \
+          -F "response_format=text" > /dev/null
+        end_time=$(date +%s.%N)
+        elapsed=$(echo "$end_time - $start_time" | bc)
+        echo "completed in ${elapsed}s"
+    done
 fi
 
 echo ""

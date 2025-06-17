@@ -159,6 +159,16 @@ Choose the right model based on your needs:
 
 The API is fully compatible with OpenAI's Whisper API.
 
+### Performance Profiles
+
+Choose a model variant based on your needs:
+
+| Model | Description | Speed | Quality | Use Case |
+|-------|-------------|-------|---------|----------|
+| `whisper-1` | Balanced (default) | 1x | ★★★★☆ | General purpose |
+| `whisper-1-fast` | Speed optimized | 2-3x | ★★★☆☆ | Real-time, drafts |
+| `whisper-1-quality` | Quality optimized | 0.5x | ★★★★★ | Professional, accuracy-critical |
+
 ### Using OpenAI Python Client
 
 ```python
@@ -170,32 +180,52 @@ client = OpenAI(
     base_url="http://localhost:8000/v1"
 )
 
-# Transcribe audio
-with open("audio.mp3", "rb") as audio_file:
-    transcription = client.audio.transcriptions.create(
-        model="whisper-1",
-        file=audio_file,
-        response_format="text"
-    )
-    print(transcription)
+# Fast transcription
+transcription = client.audio.transcriptions.create(
+    model="whisper-1-fast",  # Use fast profile
+    file=open("audio.mp3", "rb"),
+    response_format="text"
+)
+
+# High-quality transcription
+transcription = client.audio.transcriptions.create(
+    model="whisper-1-quality",  # Use quality profile
+    file=open("audio.mp3", "rb"),
+    response_format="json"
+)
 ```
 
 ### Using cURL
 
 ```bash
-# Transcription
+# Default balanced transcription
 curl -X POST "http://localhost:8000/v1/audio/transcriptions" \
   -H "Authorization: Bearer your-secret-key" \
   -F "file=@audio.mp3" \
   -F "model=whisper-1" \
-  -F "response_format=json" \
-  -F "language=en"
+  -F "response_format=json"
 
-# Translation (to English)
-curl -X POST "http://localhost:8000/v1/audio/translations" \
+# Fast transcription (2-3x faster)
+curl -X POST "http://localhost:8000/v1/audio/transcriptions" \
   -H "Authorization: Bearer your-secret-key" \
-  -F "file=@foreign_audio.mp3" \
-  -F "model=whisper-1"
+  -F "file=@audio.mp3" \
+  -F "model=whisper-1-fast" \
+  -F "response_format=text"
+
+# High-quality transcription (2x slower, more accurate)
+curl -X POST "http://localhost:8000/v1/audio/transcriptions" \
+  -H "Authorization: Bearer your-secret-key" \
+  -F "file=@audio.mp3" \
+  -F "model=whisper-1-quality" \
+  -F "response_format=json"
+```
+
+### List Available Models
+
+```bash
+# See all available models with their performance characteristics
+curl -H "Authorization: Bearer your-secret-key" \
+  http://localhost:8000/v1/models
 ```
 
 ### Response Formats
